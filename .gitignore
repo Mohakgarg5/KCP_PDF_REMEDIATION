@@ -30,3 +30,9 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Loose zips / guide artifacts
+*.zip
+GUIDE.md
+GUIDE.pdf
+make_guide_pdf.py
