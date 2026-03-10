@@ -42,6 +42,13 @@ html, body, [data-testid="stApp"] {
     background: #161b27;
     border-right: 1px solid #2a2f3e;
 }
+[data-testid="stSidebar"] * {
+    color: #c8d0e0 !important;
+}
+[data-testid="stSidebar"] h3 {
+    color: #e8eaf0 !important;
+    font-size: 1rem !important;
+}
 
 /* ---- hero banner ---- */
 .hero {
@@ -151,7 +158,7 @@ with st.sidebar:
         ("📑", "MarkInfo, TabOrder, ViewerPrefs"),
     ]
     for icon, label in fixes:
-        st.markdown(f"{icon} &nbsp; <span style='font-size:.88rem'>{label}</span>", unsafe_allow_html=True)
+        st.markdown(f"{icon} &nbsp; <span style='font-size:.88rem; color:#c8d0e0;'>{label}</span>", unsafe_allow_html=True)
 
     st.markdown("---")
     st.markdown("**Standards**")
