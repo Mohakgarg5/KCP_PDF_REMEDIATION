@@ -3,3 +3,4 @@ pdfminer.six==20260107
 Pillow>=10.0.0
 streamlit==1.54.0
 langdetect>=1.0.9
+fonttools>=4.0.0

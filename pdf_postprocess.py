@@ -559,18 +559,21 @@ _WIN1252_SPECIAL = {
     0x9C: 0x0153, 0x9E: 0x017E, 0x9F: 0x0178,
 }
 
-# Map PostScript font names to possible TTF file names
+# Map PostScript font names to possible TTF file names.
+# Each list is tried in order — first match wins.
+# Liberation fonts (apt-get install fonts-liberation) are metrically compatible
+# substitutes for Arial/Times/Courier on Linux/Docker where MS fonts are absent.
 _FONT_FILE_NAMES = {
-    "TimesNewRomanPSMT": ["Times New Roman.ttf", "times.ttf"],
-    "TimesNewRomanPS-BoldMT": ["Times New Roman Bold.ttf", "timesbd.ttf"],
-    "TimesNewRomanPS-ItalicMT": ["Times New Roman Italic.ttf", "timesi.ttf"],
-    "TimesNewRomanPS-BoldItalicMT": ["Times New Roman Bold Italic.ttf", "timesbi.ttf"],
-    "ArialMT": ["Arial.ttf", "arial.ttf"],
-    "Arial-BoldMT": ["Arial Bold.ttf", "arialbd.ttf"],
-    "Arial-ItalicMT": ["Arial Italic.ttf", "ariali.ttf"],
-    "Arial-BoldItalicMT": ["Arial Bold Italic.ttf", "arialbi.ttf"],
-    "CourierNewPSMT": ["Courier New.ttf", "cour.ttf"],
-    "CourierNewPS-BoldMT": ["Courier New Bold.ttf", "courbd.ttf"],
+    "TimesNewRomanPSMT": ["Times New Roman.ttf", "times.ttf", "LiberationSerif-Regular.ttf"],
+    "TimesNewRomanPS-BoldMT": ["Times New Roman Bold.ttf", "timesbd.ttf", "LiberationSerif-Bold.ttf"],
+    "TimesNewRomanPS-ItalicMT": ["Times New Roman Italic.ttf", "timesi.ttf", "LiberationSerif-Italic.ttf"],
+    "TimesNewRomanPS-BoldItalicMT": ["Times New Roman Bold Italic.ttf", "timesbi.ttf", "LiberationSerif-BoldItalic.ttf"],
+    "ArialMT": ["Arial.ttf", "arial.ttf", "LiberationSans-Regular.ttf"],
+    "Arial-BoldMT": ["Arial Bold.ttf", "arialbd.ttf", "LiberationSans-Bold.ttf"],
+    "Arial-ItalicMT": ["Arial Italic.ttf", "ariali.ttf", "LiberationSans-Italic.ttf"],
+    "Arial-BoldItalicMT": ["Arial Bold Italic.ttf", "arialbi.ttf", "LiberationSans-BoldItalic.ttf"],
+    "CourierNewPSMT": ["Courier New.ttf", "cour.ttf", "LiberationMono-Regular.ttf"],
+    "CourierNewPS-BoldMT": ["Courier New Bold.ttf", "courbd.ttf", "LiberationMono-Bold.ttf"],
     "Verdana": ["Verdana.ttf", "verdana.ttf"],
     "Verdana-Bold": ["Verdana Bold.ttf", "verdanab.ttf"],
     "Georgia": ["Georgia.ttf", "georgia.ttf"],
@@ -580,14 +583,14 @@ _FONT_FILE_NAMES = {
     "Calibri": ["Calibri.ttf", "calibri.ttf"],
     "Calibri-Bold": ["Calibri Bold.ttf", "calibrib.ttf"],
     "Cambria": ["Cambria.ttf", "cambria.ttf"],
-    # Helvetica → Arial fallback (Helvetica not available as standalone TTF on most systems)
-    "Helvetica": ["Arial.ttf", "arial.ttf"],
-    "Helvetica,Bold": ["Arial Bold.ttf", "arialbd.ttf"],
-    "Helvetica-Bold": ["Arial Bold.ttf", "arialbd.ttf"],
-    "Helvetica,Italic": ["Arial Italic.ttf", "ariali.ttf"],
-    "Helvetica-Oblique": ["Arial Italic.ttf", "ariali.ttf"],
-    "Helvetica,BoldItalic": ["Arial Bold Italic.ttf", "arialbi.ttf"],
-    "Helvetica-BoldOblique": ["Arial Bold Italic.ttf", "arialbi.ttf"],
+    # Helvetica → Arial / Liberation Sans fallback
+    "Helvetica": ["Arial.ttf", "arial.ttf", "LiberationSans-Regular.ttf"],
+    "Helvetica,Bold": ["Arial Bold.ttf", "arialbd.ttf", "LiberationSans-Bold.ttf"],
+    "Helvetica-Bold": ["Arial Bold.ttf", "arialbd.ttf", "LiberationSans-Bold.ttf"],
+    "Helvetica,Italic": ["Arial Italic.ttf", "ariali.ttf", "LiberationSans-Italic.ttf"],
+    "Helvetica-Oblique": ["Arial Italic.ttf", "ariali.ttf", "LiberationSans-Italic.ttf"],
+    "Helvetica,BoldItalic": ["Arial Bold Italic.ttf", "arialbi.ttf", "LiberationSans-BoldItalic.ttf"],
+    "Helvetica-BoldOblique": ["Arial Bold Italic.ttf", "arialbi.ttf", "LiberationSans-BoldItalic.ttf"],
 }
 
 # Map PostScript font names to TTC (TrueType Collection) files + font index
@@ -795,13 +798,23 @@ def _try_embed_font(pdf: pikepdf.Pdf, font_obj, base_font: str):
     """Try to find and embed a system font file."""
     font_location = _find_system_font(base_font)
     if not font_location:
+        logger.warning(
+            "Could not find system font file for '%s' — font will NOT be embedded. "
+            "On Linux, install: apt-get install fonts-liberation ttf-mscorefonts-installer",
+            base_font,
+        )
         return
 
     try:
         from fontTools.ttLib import TTFont
         from fontTools.subset import Subsetter
     except ImportError:
-        logger.warning("fontTools not installed — cannot embed font '%s'", base_font)
+        msg = (
+            "fontTools is not installed — font embedding skipped for '%s'. "
+            "Run: pip install fonttools" % base_font
+        )
+        logger.error(msg)
+        print(f"ERROR: {msg}")
         return
 
     try:
