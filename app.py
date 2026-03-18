@@ -33,112 +33,144 @@ st.set_page_config(
 # ── Custom CSS ────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
 /* ---- global ---- */
 html, body, [data-testid="stApp"] {
-    background: #0f1117;
-    color: #e8eaf0;
+    background: #0d0d14;
+    color: #e2e0f0;
+    font-family: 'Inter', sans-serif;
 }
 [data-testid="stSidebar"] {
-    background: #161b27;
-    border-right: 1px solid #2a2f3e;
+    background: #111118;
+    border-right: 1px solid #1f1d35;
 }
 [data-testid="stSidebar"] * {
-    color: #c8d0e0 !important;
+    color: #b8b4d8 !important;
 }
 [data-testid="stSidebar"] h3 {
-    color: #e8eaf0 !important;
+    color: #e2e0f0 !important;
     font-size: 1rem !important;
+    letter-spacing: .01em;
 }
 
 /* ---- hero banner ---- */
 .hero {
-    background: linear-gradient(135deg, #1e3a5f 0%, #0d2137 60%, #101624 100%);
-    border: 1px solid #2d4a6b;
-    border-radius: 16px;
-    padding: 2.4rem 2.8rem 2rem;
+    background: linear-gradient(135deg, #1e1640 0%, #16103a 50%, #0d0d14 100%);
+    border: 1px solid #2e2860;
+    border-radius: 20px;
+    padding: 2.6rem 3rem 2.2rem;
     margin-bottom: 2rem;
+    position: relative;
+    overflow: hidden;
 }
-.hero h1 { font-size: 2.2rem; font-weight: 800; margin: 0 0 .4rem; color: #e8eaf0; }
-.hero p  { font-size: 1.05rem; color: #9aa8be; margin: 0; }
+.hero::before {
+    content: '';
+    position: absolute;
+    top: -60px; right: -60px;
+    width: 240px; height: 240px;
+    background: radial-gradient(circle, rgba(109,40,217,0.18) 0%, transparent 70%);
+    pointer-events: none;
+}
+.hero h1 {
+    font-size: 2.3rem;
+    font-weight: 800;
+    margin: 0 0 .5rem;
+    color: #f0eeff;
+    letter-spacing: -.02em;
+}
+.hero p { font-size: 1.05rem; color: #8c88b8; margin: 0; line-height: 1.6; }
 .badge {
     display: inline-block;
-    background: #1a3a5c;
-    border: 1px solid #2d5a8e;
+    background: rgba(109,40,217,0.18);
+    border: 1px solid #4c35a0;
     border-radius: 6px;
     padding: 3px 10px;
-    font-size: .78rem;
-    color: #7eb8f7;
+    font-size: .76rem;
+    font-weight: 500;
+    color: #a78bfa;
     margin-right: 6px;
     margin-top: 10px;
+    letter-spacing: .03em;
 }
 
 /* ---- file card ---- */
 .file-card {
-    background: #161b27;
-    border: 1px solid #2a2f3e;
-    border-radius: 12px;
+    background: #16151f;
+    border: 1px solid #26233c;
+    border-radius: 14px;
     padding: 1.1rem 1.4rem;
-    margin-bottom: .9rem;
+    margin-bottom: .8rem;
     display: flex;
     align-items: center;
     gap: 1rem;
+    transition: border-color .2s;
 }
+.file-card:hover { border-color: #4c35a0; }
 .file-icon { font-size: 1.6rem; flex-shrink: 0; }
 .file-info { flex: 1; min-width: 0; }
-.file-name { font-weight: 600; font-size: .95rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.file-size { font-size: .78rem; color: #6c7a94; margin-top: 2px; }
+.file-name { font-weight: 600; font-size: .95rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #e2e0f0; }
+.file-size { font-size: .78rem; color: #5e5a80; margin-top: 2px; }
 .status-badge {
-    font-size: .75rem;
+    font-size: .73rem;
     font-weight: 600;
-    padding: 3px 10px;
+    padding: 3px 11px;
     border-radius: 20px;
     white-space: nowrap;
     flex-shrink: 0;
+    letter-spacing: .04em;
+    text-transform: uppercase;
 }
-.status-waiting  { background: #1e2535; color: #6c7a94; border: 1px solid #2a3040; }
-.status-running  { background: #1a3050; color: #7eb8f7; border: 1px solid #2d5a8e; }
-.status-done     { background: #0d3320; color: #4ade80; border: 1px solid #166534; }
-.status-error    { background: #3a1010; color: #f87171; border: 1px solid #7f1d1d; }
-.status-skipped  { background: #2a2000; color: #facc15; border: 1px solid #713f12; }
+.status-waiting  { background: #1a182a; color: #5e5a80; border: 1px solid #2a2640; }
+.status-running  { background: rgba(109,40,217,0.15); color: #a78bfa; border: 1px solid #4c35a0; }
+.status-done     { background: rgba(16,185,129,0.12); color: #34d399; border: 1px solid #065f46; }
+.status-error    { background: rgba(220,38,38,0.12);  color: #f87171; border: 1px solid #7f1d1d; }
+.status-skipped  { background: rgba(245,158,11,0.12); color: #fbbf24; border: 1px solid #78350f; }
 
 /* ---- metric card ---- */
-.metric-row { display: flex; gap: .8rem; margin: .8rem 0 1rem; flex-wrap: wrap; }
+.metric-row { display: flex; gap: .75rem; margin: .8rem 0 1.1rem; flex-wrap: wrap; }
 .metric-card {
-    background: #1a2035;
-    border: 1px solid #2a3550;
-    border-radius: 10px;
-    padding: .7rem 1.1rem;
+    background: #16151f;
+    border: 1px solid #26233c;
+    border-radius: 12px;
+    padding: .75rem 1.1rem;
     flex: 1;
-    min-width: 90px;
+    min-width: 88px;
     text-align: center;
 }
-.metric-card .val { font-size: 1.5rem; font-weight: 700; color: #7eb8f7; }
-.metric-card .lbl { font-size: .72rem; color: #6c7a94; margin-top: 2px; text-transform: uppercase; letter-spacing: .05em; }
+.metric-card .val { font-size: 1.55rem; font-weight: 700; color: #a78bfa; }
+.metric-card .lbl { font-size: .7rem; color: #5e5a80; margin-top: 3px; text-transform: uppercase; letter-spacing: .07em; }
 
 /* ---- summary banner ---- */
-.summary-ok   { background:#0d3320; border:1px solid #166534; border-radius:10px; padding:1rem 1.4rem; color:#4ade80; font-weight:600; }
-.summary-warn { background:#2a2000; border:1px solid #713f12; border-radius:10px; padding:1rem 1.4rem; color:#facc15; font-weight:600; }
+.summary-ok   { background: rgba(16,185,129,0.1); border: 1px solid #065f46; border-radius: 12px; padding: 1rem 1.4rem; color: #34d399; font-weight: 600; }
+.summary-warn { background: rgba(245,158,11,0.1);  border: 1px solid #78350f; border-radius: 12px; padding: 1rem 1.4rem; color: #fbbf24; font-weight: 600; }
 
 /* ---- buttons ---- */
 div[data-testid="stButton"] > button,
 div[data-testid="stDownloadButton"] > button {
-    border-radius: 8px !important;
+    border-radius: 10px !important;
     font-weight: 600 !important;
+    letter-spacing: .01em !important;
 }
 
 /* ---- upload zone ---- */
 [data-testid="stFileUploader"] {
-    background: #161b27;
-    border-radius: 12px;
-    border: 2px dashed #2a3550;
+    background: #16151f;
+    border-radius: 14px;
+    border: 2px dashed #2e2860;
     padding: .5rem;
 }
 
 /* ---- divider ---- */
-hr { border-color: #2a2f3e !important; }
+hr { border-color: #1f1d35 !important; }
 
 /* ---- expander ---- */
-details summary { color: #9aa8be !important; }
+details summary { color: #8c88b8 !important; }
+
+/* ---- progress bar accent ---- */
+[data-testid="stProgressBar"] > div > div {
+    background: linear-gradient(90deg, #6d28d9, #a78bfa) !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
