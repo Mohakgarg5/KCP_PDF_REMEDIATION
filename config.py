@@ -19,6 +19,10 @@ WATERMARK_MAX_ROTATION = 75.0
 WATERMARK_MIN_FONT_SIZE = 36.0
 WATERMARK_LIGHT_COLOR_THRESHOLD = 0.7
 
+# Invisible/white text detection
+INVISIBLE_TEXT_COLOR_THRESHOLD = 0.95  # all RGB channels above this → near-white text
+DARK_BACKGROUND_LUMINANCE = 0.5        # BT.601 luminance below this → background is dark
+
 # Header/footer detection (fraction of page height)
 HEADER_ZONE_FRACTION = 0.08
 FOOTER_ZONE_FRACTION = 0.08

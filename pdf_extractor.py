@@ -58,9 +58,14 @@ def extract_document(pdf_path: str) -> DocumentContent:
     # Phase 5: Detect repeated header/footer text across pages
     hf_signatures = _detect_header_footer_signatures(raw_pages)
 
+    # Phase 5b: Extract filled rectangles per page for white-text background detection
+    bg_rects_per_page = _extract_filled_rects(pdf_path, len(raw_pages))
+
     # Phase 6: Classify elements
     for page in raw_pages:
-        _classify_elements(page, body_font_size, hf_signatures)
+        page_bg = (bg_rects_per_page[page.page_number]
+                   if page.page_number < len(bg_rects_per_page) else [])
+        _classify_elements(page, body_font_size, hf_signatures, page_bg)
 
     # Phase 7: Normalize heading hierarchy (start at H1, no skipped levels)
     _normalize_heading_hierarchy(raw_pages)
@@ -535,13 +540,27 @@ def _detect_header_footer_signatures(pages: list) -> set:
     return {key for key, page_nums in zone_texts.items() if len(page_nums) >= 2}
 
 
-def _classify_elements(page: PageContent, body_font_size: float, hf_signatures: set):
+def _classify_elements(page: PageContent, body_font_size: float, hf_signatures: set,
+                       bg_rects: list = None):
     """Classify text blocks as headings, watermarks, headers/footers, etc."""
     page_height = page.height
     header_threshold = page_height * (1 - config.HEADER_ZONE_FRACTION)
     footer_threshold = page_height * config.FOOTER_ZONE_FRACTION
 
     for tb in page.text_blocks:
+        # Invisible (near-white) text detection — runs before watermark check.
+        # Text whose colour is essentially white and has no dark background rectangle
+        # is invisible to sighted users; mark it as an artifact so WCAG 1.4.3
+        # contrast checks are not applied to it.
+        if bg_rects is not None:
+            is_near_white = all(
+                c >= config.INVISIBLE_TEXT_COLOR_THRESHOLD
+                for c in tb.font.color
+            )
+            if is_near_white and not _has_dark_background(tb.bbox, bg_rects):
+                tb.element_type = ElementType.WATERMARK
+                continue
+
         # Watermark detection
         abs_rotation = abs(tb.rotation_degrees)
         is_rotated = (config.WATERMARK_MIN_ROTATION <= abs_rotation
@@ -763,6 +782,155 @@ def _extract_images(pdf_path: str, pages: list):
                 continue
 
     pdf.close()
+
+
+def _extract_filled_rects(pdf_path: str, page_count: int) -> list:
+    """Parse each page's content stream to collect filled rectangles and their RGB fill colors.
+
+    Returns a list of length page_count. Each entry is a list of tuples:
+        (x0, y0, x1, y1, r, g, b)  — all floats, r/g/b in [0, 1].
+
+    Only simple rectangles defined by the 're' operator are tracked.
+    Multiple consecutive 're' operators before a single fill are all recorded.
+    Complex paths (m/l/c) are ignored.
+    Fill colour state is tracked through q/Q graphics-state save/restore pairs.
+    Handles DeviceRGB ('rg'), DeviceGray ('g'), and DeviceCMYK ('k') colour operators.
+    'sc'/'scn' (ICC/pattern colour spaces) are not handled; if encountered, the
+    previously-known fill colour is kept, which may over-preserve white text (safe).
+    """
+    result = [[] for _ in range(page_count)]
+
+    try:
+        pdf = pikepdf.Pdf.open(pdf_path)
+    except Exception as e:
+        logger.warning("Could not open PDF for background rect extraction: %s", e)
+        return result
+
+    for page_idx, page in enumerate(pdf.pages):
+        if page_idx >= page_count:
+            break
+        try:
+            ops = list(pikepdf.parse_content_stream(page))
+        except Exception as e:
+            logger.debug("Could not parse content stream on page %d: %s", page_idx, e)
+            continue
+
+        fill_color = (0.0, 0.0, 0.0)   # default fill: black
+        color_stack = []                 # for q/Q save-restore
+        pending_rects = []               # accumulated 're' rectangles before fill
+        complex_path = False             # True if non-rect path ops seen after last 're'
+
+        for operands, operator in ops:
+            op = str(operator)
+
+            # --- Graphics state save / restore ---
+            if op == "q":
+                color_stack.append(fill_color)
+                continue
+            if op == "Q":
+                if color_stack:
+                    fill_color = color_stack.pop()
+                continue
+
+            # --- Non-stroking (fill) colour operators ---
+            if op == "rg" and len(operands) >= 3:
+                try:
+                    fill_color = (
+                        float(operands[0]),
+                        float(operands[1]),
+                        float(operands[2]),
+                    )
+                except (ValueError, TypeError):
+                    pass
+                continue
+
+            if op == "g" and len(operands) >= 1:
+                try:
+                    g = float(operands[0])
+                    fill_color = (g, g, g)
+                except (ValueError, TypeError):
+                    pass
+                continue
+
+            if op == "k" and len(operands) >= 4:
+                try:
+                    c, m, y, k = [float(v) for v in operands[:4]]
+                    fill_color = (
+                        (1 - c) * (1 - k),
+                        (1 - m) * (1 - k),
+                        (1 - y) * (1 - k),
+                    )
+                except (ValueError, TypeError):
+                    pass
+                continue
+
+            # --- Rectangle path definition ---
+            # Multiple 're' ops can precede a single fill ('re re re f' is valid PDF).
+            if op == "re" and len(operands) >= 4:
+                try:
+                    x = float(operands[0])
+                    y = float(operands[1])
+                    w = float(operands[2])
+                    h = float(operands[3])
+                    pending_rects.append((
+                        min(x, x + w), min(y, y + h),
+                        max(x, x + w), max(y, y + h),
+                    ))
+                    complex_path = False
+                except (ValueError, TypeError):
+                    pass
+                continue
+
+            # --- Complex path construction (not a simple rect) ---
+            if op in ("m", "l", "c", "v", "y", "h"):
+                complex_path = True
+                continue
+
+            # --- W / W* are clipping modifiers, NOT path-ending operators ---
+            # They must precede the next path op; do not disturb pending_rects.
+            if op in ("W", "W*"):
+                continue
+
+            # --- Fill operations: record all pending simple rects ---
+            if op in ("f", "F", "f*", "B", "B*", "b", "b*"):
+                if not complex_path:
+                    for rect in pending_rects:
+                        result[page_idx].append((*rect, *fill_color))
+                pending_rects = []
+                complex_path = False
+                continue
+
+            # --- Path end without fill: discard pending rects ---
+            if op in ("n", "S", "s"):
+                pending_rects = []
+                complex_path = False
+                continue
+
+    try:
+        pdf.close()
+    except Exception:
+        pass
+
+    return result
+
+
+def _has_dark_background(bbox: BBox, bg_rects: list) -> bool:
+    """Return True if the text block's centre point falls inside a dark filled rectangle.
+
+    Uses BT.601 luminance (0.299R + 0.587G + 0.114B) to classify background brightness.
+    Note: this is used for background classification only, not for computing WCAG
+    contrast ratios (which use BT.709 coefficients).
+    A luminance below config.DARK_BACKGROUND_LUMINANCE is considered dark.
+    """
+    cx = (bbox.x0 + bbox.x1) / 2
+    cy = (bbox.y0 + bbox.y1) / 2
+
+    for rx0, ry0, rx1, ry1, r, g, b in bg_rects:
+        if rx0 <= cx <= rx1 and ry0 <= cy <= ry1:
+            luminance = 0.299 * r + 0.587 * g + 0.114 * b
+            if luminance < config.DARK_BACKGROUND_LUMINANCE:
+                return True
+    return False
 
 
 def _detect_title(pages: list, pdf_path: str) -> str:
