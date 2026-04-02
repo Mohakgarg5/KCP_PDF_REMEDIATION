@@ -1050,12 +1050,27 @@ def _build_structure_tree(pdf: pikepdf.Pdf, all_page_elems: list,
     def _remap_struct_type(page_idx: int, elem_idx: int, st: str) -> str:
         return _elem_overrides.get((page_idx, elem_idx), st)
 
+    # Build Document → Art hierarchy to match InDesign's exported structure.
+    # InDesign automatically wraps all body content in an <Art> element; our
+    # flat Document → P... output was missing this container.
+    outer_doc_kids = pikepdf.Array()
+    outer_doc_elem = pdf.make_indirect(pikepdf.Dictionary({
+        "/Type": pikepdf.Name("/StructElem"),
+        "/S": pikepdf.Name("/Document"),
+        "/K": outer_doc_kids,
+    }))
+
+    # <Art> sits directly under <Document>; all content elements go under <Art>.
+    # The local names doc_elem / doc_kids are kept so the rest of the function
+    # (grouping helpers, ParentTree wiring) continues to work unchanged.
     doc_kids = pikepdf.Array()
     doc_elem = pdf.make_indirect(pikepdf.Dictionary({
         "/Type": pikepdf.Name("/StructElem"),
-        "/S": pikepdf.Name("/Document"),
+        "/S": pikepdf.Name("/Art"),
+        "/P": outer_doc_elem,
         "/K": doc_kids,
     }))
+    outer_doc_kids.append(doc_elem)
 
     parent_tree_nums = pikepdf.Array()
     all_leaf_elems = []  # (elem_ref, struct_type) for grouping
@@ -1209,12 +1224,12 @@ def _build_structure_tree(pdf: pikepdf.Pdf, all_page_elems: list,
 
     struct_tree_root = pdf.make_indirect(pikepdf.Dictionary({
         "/Type": pikepdf.Name("/StructTreeRoot"),
-        "/K": doc_elem,
+        "/K": outer_doc_elem,
         "/ParentTree": parent_tree,
         "/ParentTreeNextKey": next_key,
     }))
 
-    doc_elem["/P"] = struct_tree_root
+    outer_doc_elem["/P"] = struct_tree_root
     pdf.Root[pikepdf.Name.StructTreeRoot] = struct_tree_root
 
 

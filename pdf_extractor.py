@@ -807,6 +807,47 @@ def _read_existing_alt_texts(pdf_path: str) -> dict:
     return result
 
 
+def _collect_images_recursive(resources, visited=None):
+    """Recursively yield (name, obj) for every Image XObject reachable from resources.
+
+    Descends into Form XObjects so images nested inside InDesign containers
+    (e.g. grouped figures, chart forms) are found regardless of nesting depth.
+    Cycle detection via visited set prevents infinite recursion on circular refs.
+    """
+    if visited is None:
+        visited = set()
+    if resources is None:
+        return
+    try:
+        xobjects = resources.get("/XObject")
+    except Exception:
+        return
+    if xobjects is None:
+        return
+
+    for name, obj in xobjects.items():
+        try:
+            if not hasattr(obj, "keys"):
+                continue
+            try:
+                obj_id = obj.objgen
+                if obj_id in visited:
+                    continue
+                visited.add(obj_id)
+            except Exception:
+                pass
+
+            subtype = obj.get("/Subtype")
+            if subtype == pikepdf.Name.Image:
+                yield (name, obj)
+            elif subtype == pikepdf.Name.Form:
+                form_resources = obj.get("/Resources")
+                if form_resources:
+                    yield from _collect_images_recursive(form_resources, visited)
+        except Exception:
+            continue
+
+
 def _extract_images(pdf_path: str, pages: list, existing_alt_texts: dict = None):
     """Extract images from PDF using pikepdf."""
     try:
@@ -832,20 +873,12 @@ def _extract_images(pdf_path: str, pages: list, existing_alt_texts: dict = None)
                     parent = parent.get("/Parent")
             if resources is None:
                 continue
-            xobjects = resources.get("/XObject")
-            if xobjects is None:
-                continue
         except Exception as e:
             logger.warning("Could not read resources on page %d: %s", page_idx, e)
             continue
 
-        for name, obj in xobjects.items():
+        for name, obj in _collect_images_recursive(resources):
             try:
-                if not hasattr(obj, "keys"):
-                    continue
-                if obj.get("/Subtype") != pikepdf.Name.Image:
-                    continue
-
                 pdfimage = pikepdf.PdfImage(obj)
                 pil_image = pdfimage.as_pil_image()
                 buf = BytesIO()
