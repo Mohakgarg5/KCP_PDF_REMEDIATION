@@ -138,7 +138,7 @@ def _tag_page(pdf, page, page_content: Optional[PageContent],
     link_annots = _collect_link_annots(page)
 
     new_ops, struct_elems = _insert_markers(
-        ops, blocks, page, watermark_forms, mcid_counter, link_annots
+        ops, blocks, page, watermark_forms, mcid_counter, link_annots, pdf=pdf
     )
 
     new_stream_data = pikepdf.unparse_content_stream(new_ops)
@@ -197,7 +197,7 @@ def _build_block_index(page_content: Optional[PageContent]) -> list:
         blocks.append({
             "bbox": img.bbox,
             "struct_type": "/Figure",
-            "alt_text": img.alt_text or "Image",
+            "alt_text": img.alt_text or "Figure",
             "is_artifact": img.is_decorative,
             "is_vector": getattr(img, "is_vector_figure", False),
             "used": False,
@@ -317,13 +317,45 @@ def _find_link_annot(x: float, y: float, link_annots: list) -> Optional[int]:
     return best_idx
 
 
+def _clean_form_xobject_markers(pdf: pikepdf.Pdf, page, xobj_name: str):
+    """Strip all BDC/BMC/EMC markers from a Form XObject's content stream.
+
+    When a Form XObject is wrapped as a <Figure> in the page stream, any
+    Artifact or MCID markers inside the Form create PDF/UA Clause 7.1
+    violations (Artifact inside tagged content, or tagged content inside
+    Artifact).  Stripping them makes the Form's content "clean" so the
+    outer Figure tag is the sole structure context.
+    """
+    try:
+        xobjects = _get_xobjects(page)
+        if xobjects is None:
+            return
+        obj = xobjects.get(xobj_name) or xobjects.get(xobj_name.lstrip("/"))
+        if obj is None or not hasattr(obj, "get"):
+            return
+        if obj.get("/Subtype") != pikepdf.Name.Form:
+            return
+        try:
+            ops = list(pikepdf.parse_content_stream(obj))
+        except Exception:
+            return
+        stripped = _strip_markers(ops)
+        if len(stripped) == len(ops):
+            return  # nothing changed — avoid unnecessary stream rewrite
+        new_data = pikepdf.unparse_content_stream(stripped)
+        obj.write(new_data)
+    except Exception as e:
+        logger.debug("Could not clean Form XObject '%s' markers: %s", xobj_name, e)
+
+
 def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
-                    link_annots=None):
+                    link_annots=None, pdf=None):
     """Walk through content stream ops, inserting BDC/EMC structure markers.
 
     Uses an "artifact-as-default" strategy so nothing is ever untagged.
     When link_annots is provided, text falling within a link annotation's
     rect is tagged as /Link with both MCR and annotation reference.
+    pdf is required for cleaning Form XObject content streams.
     """
     if link_annots is None:
         link_annots = []
@@ -682,23 +714,35 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
                 # If a vector figure placeholder exists for this page, tag this
                 # Form XObject as a Figure (vector chart/diagram from InDesign).
                 vec_idx = _find_vector_figure_block(blocks)
+                # Strip any Artifact/BDC/EMC markers from the Form's own content
+                # stream before wrapping it as Figure.  Internal markers inside a
+                # Figure-wrapped Form violate PDF/UA Clause 7.1 (Artifact inside
+                # tagged content, and vice-versa).
+                if pdf is not None:
+                    _clean_form_xobject_markers(pdf, page, xobj_name)
+                _close_struct()
+                _close_artifact()
+                mcid = mcid_counter[0]
+                mcid_counter[0] += 1
+                new_ops.append((
+                    [pikepdf.Name("/Figure"),
+                     pikepdf.Dictionary({"/MCID": mcid})],
+                    pikepdf.Operator("BDC"),
+                ))
+                new_ops.append((operands, operator))
+                new_ops.append(([], pikepdf.Operator("EMC")))
                 if vec_idx is not None:
-                    _close_struct()
-                    _close_artifact()
-                    mcid = mcid_counter[0]
-                    mcid_counter[0] += 1
                     blocks[vec_idx]["used"] = True
-                    new_ops.append((
-                        [pikepdf.Name("/Figure"),
-                         pikepdf.Dictionary({"/MCID": mcid})],
-                        pikepdf.Operator("BDC"),
-                    ))
-                    new_ops.append((operands, operator))
-                    new_ops.append(([], pikepdf.Operator("EMC")))
                     alt = blocks[vec_idx].get("alt_text", "Figure")
-                    struct_elems.append((mcid, "/Figure", alt, None))
-                    _open_artifact()
-                    continue
+                else:
+                    # No alt-text placeholder — still wrap the whole Form XObject
+                    # as a single Figure so its constituent paths are never exposed
+                    # as individual tagged elements (reviewer request: don't break
+                    # figures into their constituent components).
+                    alt = "Figure"
+                struct_elems.append((mcid, "/Figure", alt, None))
+                _open_artifact()
+                continue
 
             # Any other Do → stays in artifact wrapper
             if not artifact_open:

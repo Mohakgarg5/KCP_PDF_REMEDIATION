@@ -586,7 +586,10 @@ def _classify_elements(page: PageContent, body_font_size: float, hf_signatures: 
                 normalized = "__page_number__"
             normalized = normalized.replace("\n", " ").strip()
 
-            if (normalized, zone) in hf_signatures:
+            # Only artifact repeating headers/footers from page 2 onwards.
+            # On the first page they are genuine document metadata (case #,
+            # byline, date) and must remain readable by screen readers.
+            if page.page_number > 0 and (normalized, zone) in hf_signatures:
                 tb.element_type = ElementType.HEADER_FOOTER
                 continue
             # Also catch small-font text in footer zone (copyright notices etc.)
@@ -747,33 +750,37 @@ def _read_existing_alt_texts(pdf_path: str) -> dict:
                 visited.add(oid)
 
                 struct_type = node.get("/S")
-                alt = node.get("/Alt")
-                if struct_type == pikepdf.Name("/Figure") and alt:
-                    alt_str = str(alt)
-                    if alt_str.strip():
-                        # Determine which page this element belongs to by
-                        # following /Pg on the element or its first /K child.
-                        pg = node.get("/Pg")
-                        if pg is None:
-                            kids = node.get("/K")
-                            if kids is not None:
-                                if isinstance(kids, pikepdf.Array) and len(kids):
-                                    first = kids[0]
-                                elif hasattr(kids, "get"):
-                                    first = kids
-                                else:
-                                    first = None
-                                try:
-                                    pg = first.get("/Pg") if (first is not None and hasattr(first, "get")) else None
-                                except Exception:
-                                    pg = None
-                        if pg is not None:
+                if struct_type == pikepdf.Name("/Figure"):
+                    # Always record every Figure element — including those with
+                    # no /Alt — so positional indices stay aligned with XObject
+                    # iteration order.  Empty string means "no existing alt text;
+                    # use the generated fallback instead."
+                    raw_alt = node.get("/Alt")
+                    alt_str = str(raw_alt).strip() if raw_alt else ""
+
+                    # Determine which page this element belongs to by
+                    # following /Pg on the element or its first /K child.
+                    pg = node.get("/Pg")
+                    if pg is None:
+                        kids = node.get("/K")
+                        if kids is not None:
+                            if isinstance(kids, pikepdf.Array) and len(kids):
+                                first = kids[0]
+                            elif hasattr(kids, "get"):
+                                first = kids
+                            else:
+                                first = None
                             try:
-                                page_idx = page_id_to_idx.get(pg.objgen)
-                                if page_idx is not None:
-                                    result.setdefault(page_idx, []).append(alt_str)
+                                pg = first.get("/Pg") if (first is not None and hasattr(first, "get")) else None
                             except Exception:
-                                pass
+                                pg = None
+                    if pg is not None:
+                        try:
+                            page_idx = page_id_to_idx.get(pg.objgen)
+                            if page_idx is not None:
+                                result.setdefault(page_idx, []).append(alt_str)
+                        except Exception:
+                            pass
 
                 # Recurse into children
                 kids = node.get("/K")
@@ -845,12 +852,13 @@ def _extract_images(pdf_path: str, pages: list, existing_alt_texts: dict = None)
                 img_format = "PNG"
                 pil_image.save(buf, format=img_format)
 
-                # Use existing alt-text from the PDF structure tree if available,
-                # otherwise fall back to a generic placeholder.
+                # Use existing alt-text from the PDF structure tree when present;
+                # only fall back to a generic placeholder when it is missing.
+                # Empty string entries in page_alts mean the original Figure had
+                # no /Alt — generate a placeholder rather than writing blank alt text.
                 page_alts = (existing_alt_texts or {}).get(page_idx, [])
-                alt_text = (page_alts[img_index]
-                            if img_index < len(page_alts)
-                            else f"Figure {img_index + 1} on page {page_idx + 1}")
+                existing = page_alts[img_index] if img_index < len(page_alts) else ""
+                alt_text = existing if existing else f"Figure {img_index + 1} on page {page_idx + 1}"
 
                 image_block = ImageBlock(
                     image_bytes=buf.getvalue(),
@@ -876,8 +884,12 @@ def _extract_images(pdf_path: str, pages: list, existing_alt_texts: dict = None)
         # After processing all XObjects on this page, create vector figure
         # placeholders for any alt-texts that had no matching Image XObject.
         # These come from figures that are pure vector graphics (Form XObjects).
+        # Skip empty-string entries — those are raster figures that lacked /Alt
+        # and were recorded only to preserve positional alignment.
         page_alts = (existing_alt_texts or {}).get(page_idx, [])
         for extra_alt in page_alts[img_index:]:
+            if not extra_alt:
+                continue
             vector_block = ImageBlock(
                 image_bytes=b"",
                 format="",
