@@ -50,7 +50,8 @@ def extract_document(pdf_path: str) -> DocumentContent:
         page.text_blocks = _merge_split_blocks(page.text_blocks)
 
     # Phase 3: Extract images via pikepdf
-    _extract_images(pdf_path, raw_pages)
+    existing_alt_texts = _read_existing_alt_texts(pdf_path)
+    _extract_images(pdf_path, raw_pages, existing_alt_texts)
 
     # Phase 4: Detect the body font size (most common size)
     body_font_size = _detect_body_font_size(raw_pages)
@@ -682,8 +683,7 @@ def _detect_tables(page: PageContent, body_font_size: float = 12.0):
     for y in sorted_ys:
         row_blocks = sorted(multi_col_rows[y], key=lambda b: b.bbox.x0)
         if len(row_blocks) >= col_count - 1:
-            row_texts = [b.text for b in row_blocks]
-            table_rows.append(row_texts)
+            table_rows.append(list(row_blocks))  # keep TextBlock objects (bbox needed for tagging)
             table_blocks.extend(row_blocks)
 
     if len(table_rows) >= 2:
@@ -715,7 +715,92 @@ def _detect_tables(page: PageContent, body_font_size: float = 12.0):
         ]
 
 
-def _extract_images(pdf_path: str, pages: list):
+def _read_existing_alt_texts(pdf_path: str) -> dict:
+    """Read existing /Alt text from /Figure elements in the PDF structure tree.
+
+    Returns a dict mapping page_index (int) -> list of alt-text strings in
+    document order.  Only non-empty /Alt values are stored.  If the PDF has
+    no structure tree (or it cannot be read), returns an empty dict.
+    """
+    result: dict = {}
+    try:
+        pdf = pikepdf.Pdf.open(pdf_path)
+        struct_root = pdf.Root.get("/StructTreeRoot")
+        if struct_root is None:
+            pdf.close()
+            return result
+
+        # Build a page-index lookup: (objgen) -> page index
+        page_id_to_idx = {page.objgen: idx for idx, page in enumerate(pdf.pages)}
+        visited: set = set()
+
+        def _walk(node):
+            """Recursively walk the structure tree and collect Figure alt texts."""
+            try:
+                # Use objgen for cycle detection (stable across references)
+                try:
+                    oid = node.objgen
+                except Exception:
+                    oid = id(node)
+                if oid in visited:
+                    return
+                visited.add(oid)
+
+                struct_type = node.get("/S")
+                alt = node.get("/Alt")
+                if struct_type == pikepdf.Name("/Figure") and alt:
+                    alt_str = str(alt)
+                    if alt_str.strip():
+                        # Determine which page this element belongs to by
+                        # following /Pg on the element or its first /K child.
+                        pg = node.get("/Pg")
+                        if pg is None:
+                            kids = node.get("/K")
+                            if kids is not None:
+                                if isinstance(kids, pikepdf.Array) and len(kids):
+                                    first = kids[0]
+                                elif hasattr(kids, "get"):
+                                    first = kids
+                                else:
+                                    first = None
+                                try:
+                                    pg = first.get("/Pg") if (first is not None and hasattr(first, "get")) else None
+                                except Exception:
+                                    pg = None
+                        if pg is not None:
+                            try:
+                                page_idx = page_id_to_idx.get(pg.objgen)
+                                if page_idx is not None:
+                                    result.setdefault(page_idx, []).append(alt_str)
+                            except Exception:
+                                pass
+
+                # Recurse into children
+                kids = node.get("/K")
+                if kids is None:
+                    return
+                if isinstance(kids, pikepdf.Array):
+                    for child in kids:
+                        try:
+                            if hasattr(child, "get"):
+                                _walk(child)
+                        except Exception:
+                            continue
+                elif isinstance(kids, pikepdf.Dictionary):
+                    _walk(kids)
+                # Integer kids are MCID leaf references — nothing to recurse into
+            except Exception:
+                pass
+
+        _walk(struct_root)
+        pdf.close()
+    except Exception as e:
+        logger.debug("Could not read existing alt texts: %s", e)
+
+    return result
+
+
+def _extract_images(pdf_path: str, pages: list, existing_alt_texts: dict = None):
     """Extract images from PDF using pikepdf."""
     try:
         pdf = pikepdf.Pdf.open(pdf_path)
@@ -760,12 +845,19 @@ def _extract_images(pdf_path: str, pages: list):
                 img_format = "PNG"
                 pil_image.save(buf, format=img_format)
 
+                # Use existing alt-text from the PDF structure tree if available,
+                # otherwise fall back to a generic placeholder.
+                page_alts = (existing_alt_texts or {}).get(page_idx, [])
+                alt_text = (page_alts[img_index]
+                            if img_index < len(page_alts)
+                            else f"Figure {img_index + 1} on page {page_idx + 1}")
+
                 image_block = ImageBlock(
                     image_bytes=buf.getvalue(),
                     format=img_format.lower(),
                     bbox=BBox(0, 0, pdfimage.width, pdfimage.height),
                     page_number=page_idx,
-                    alt_text=f"Figure {img_index + 1} on page {page_idx + 1}",
+                    alt_text=alt_text,
                     is_decorative=False,
                 )
 
@@ -780,6 +872,22 @@ def _extract_images(pdf_path: str, pages: list):
                 logger.debug("Could not extract image '%s' on page %d: %s",
                              name, page_idx, e)
                 continue
+
+        # After processing all XObjects on this page, create vector figure
+        # placeholders for any alt-texts that had no matching Image XObject.
+        # These come from figures that are pure vector graphics (Form XObjects).
+        page_alts = (existing_alt_texts or {}).get(page_idx, [])
+        for extra_alt in page_alts[img_index:]:
+            vector_block = ImageBlock(
+                image_bytes=b"",
+                format="",
+                bbox=BBox(0, 0, 0, 0),
+                page_number=page_idx,
+                alt_text=extra_alt,
+                is_decorative=False,
+                is_vector_figure=True,
+            )
+            page_content.images.append(vector_block)
 
     pdf.close()
 
