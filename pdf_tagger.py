@@ -740,7 +740,11 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
                     # as individual tagged elements (reviewer request: don't break
                     # figures into their constituent components).
                     alt = "Figure"
-                struct_elems.append((mcid, "/Figure", alt, None))
+                # Compute bbox from the Form XObject's /BBox and the
+                # current CTM so the Figure struct element satisfies
+                # PDF/UA bounding-box requirements.
+                form_bbox = _compute_form_bbox(page, xobj_name, ctm)
+                struct_elems.append((mcid, "/Figure", alt, form_bbox))
                 _open_artifact()
                 continue
 
@@ -990,6 +994,46 @@ def _detect_watermark_forms(page) -> set:
 # ---------------------------------------------------------------------------
 # XObject helpers
 # ---------------------------------------------------------------------------
+
+def _compute_form_bbox(page, xobj_name: str, ctm: list) -> Optional[list]:
+    """Compute page-space bounding box for a Form XObject.
+
+    Reads the Form's /BBox (and optional /Matrix), composes with the
+    current CTM, and transforms all four corners to page coordinates.
+    Returns [x0, y0, x1, y1] or None if the bbox cannot be determined.
+    """
+    xobjects = _get_xobjects(page)
+    if not xobjects:
+        return None
+    obj = xobjects.get(xobj_name) or xobjects.get(xobj_name.lstrip("/"))
+    if obj is None:
+        return None
+    try:
+        raw_bbox = obj.get("/BBox")
+        if raw_bbox is None:
+            return None
+        fb = [float(raw_bbox[i]) for i in range(4)]
+        # Compose Form's own /Matrix (if any) with the current CTM
+        form_matrix = [1, 0, 0, 1, 0, 0]
+        raw_matrix = obj.get("/Matrix")
+        if raw_matrix is not None:
+            form_matrix = [float(raw_matrix[i]) for i in range(6)]
+        composed = _mat_mul(form_matrix, ctm)
+        # Transform all 4 corners of the Form's BBox to page space
+        corners = [
+            (fb[0], fb[1]), (fb[2], fb[1]),
+            (fb[2], fb[3]), (fb[0], fb[3]),
+        ]
+        xs, ys = [], []
+        for cx, cy in corners:
+            px = composed[0] * cx + composed[2] * cy + composed[4]
+            py = composed[1] * cx + composed[3] * cy + composed[5]
+            xs.append(px)
+            ys.append(py)
+        return [min(xs), min(ys), max(xs), max(ys)]
+    except Exception:
+        return None
+
 
 def _get_xobject_subtype(page, xobj_name: str) -> str:
     """Return 'Image', 'Form', or '' for the named XObject.
