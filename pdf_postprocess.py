@@ -84,6 +84,16 @@ _PLACEHOLDER_TITLES = frozenset({
     "powerpoint presentation", "microsoft powerpoint",
 })
 
+_PLACEHOLDER_PREFIXES = (
+    "microsoft word", "microsoft powerpoint", "microsoft excel",
+)
+
+
+def _is_placeholder_title(title: str) -> bool:
+    """Return True if title is a known placeholder that should be replaced."""
+    t = title.strip().lower()
+    return t in _PLACEHOLDER_TITLES or t.startswith(_PLACEHOLDER_PREFIXES)
+
 
 def _ensure_xmp_metadata(pdf: pikepdf.Pdf, title: str, language: str):
     with pdf.open_metadata() as meta:
@@ -91,7 +101,7 @@ def _ensure_xmp_metadata(pdf: pikepdf.Pdf, title: str, language: str):
         # titles (e.g. 'Title', 'Untitled') — these display as useless in PAC
         # and cause a hard PDF/UA metadata failure (Matterhorn 06-003).
         existing = meta.get("dc:title") or ""
-        if not existing.strip() or existing.strip().lower() in _PLACEHOLDER_TITLES:
+        if not existing.strip() or _is_placeholder_title(existing):
             meta["dc:title"] = title
         if not meta.get("dc:language"):
             meta["dc:language"] = language
