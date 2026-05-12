@@ -27,6 +27,12 @@ __all__ = ["ResolvedImage", "reconcile_page_images", "detect_watermark_forms"]
 logger = logging.getLogger(__name__)
 
 
+# Alt strings that match this pattern are placeholders left by older versions
+# of accessibility-tagging tools (including a prior buggy version of this
+# pipeline). Treat them as "no useful alt" so they do not propagate forward.
+_PLACEHOLDER_ALT_RE = re.compile(r"^Figure \d+ on page \d+$")
+
+
 # ---------------------------------------------------------------------------
 # Watermark detection
 # ---------------------------------------------------------------------------
@@ -323,6 +329,9 @@ def _read_source_struct_elements(pdf) -> dict[int, list[SourceStructElement]]:
                 except Exception:
                     pass
                 alt_str = str(raw_alt).strip() if raw_alt else ""
+                if _PLACEHOLDER_ALT_RE.match(alt_str):
+                    # Legacy placeholder from prior tooling — discard
+                    alt_str = ""
 
                 # Resolve /BBox (rare on Figures from Word; common on Acrobat-edited)
                 bbox = None
@@ -686,3 +695,58 @@ def _sort_visual_order(items: list) -> list:
     for row in rows:
         output.extend(sorted(row, key=x_center))
     return output
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+def reconcile_page_images(pdf_path: str) -> dict[int, list]:
+    """Reconcile every Image XObject occurrence in the PDF with source intent.
+
+    Returns {page_index: [ResolvedImage, ...]} in visual reading order.
+
+    Per-page try/except: any failure on page N is logged at DEBUG and that
+    page is omitted from the result.  The caller falls back to its prior
+    behavior (e.g. placeholder alts) for omitted pages.  Other pages still
+    get the new robust reconciliation.
+    """
+    result: dict[int, list] = {}
+    try:
+        pdf = pikepdf.Pdf.open(pdf_path)
+    except Exception as e:
+        logger.warning("Could not open PDF for reconciliation: %s", e)
+        return result
+
+    try:
+        source_by_page = _read_source_struct_elements(pdf)
+
+        for page_idx, page in enumerate(pdf.pages):
+            try:
+                try:
+                    media = page.get("/MediaBox")
+                    page_height = float(media[3]) - float(media[1]) if media else 792.0
+                except Exception:
+                    page_height = 792.0
+
+                wm_names = detect_watermark_forms(page)
+                occurrences = _parse_image_occurrences(page, wm_names)
+                if not occurrences:
+                    continue
+
+                sources = list(source_by_page.get(page_idx, []))
+                _derive_source_bboxes(sources, occurrences)
+                resolved = _match_occurrences_to_sources(
+                    occurrences, sources, page_height
+                )
+                result[page_idx] = _sort_visual_order(resolved)
+            except Exception as e:
+                logger.debug("Reconciliation failed on page %d: %s", page_idx, e)
+                continue
+    finally:
+        try:
+            pdf.close()
+        except Exception:
+            pass
+
+    return result
