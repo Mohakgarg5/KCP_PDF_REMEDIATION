@@ -523,3 +523,28 @@ def _parse_image_occurrences(page, watermark_form_names: set) -> list:
         visited_forms=set(),
     )
     return occurrences
+
+
+# ---------------------------------------------------------------------------
+# Bbox derivation for source elements lacking /BBox
+# ---------------------------------------------------------------------------
+
+def _derive_source_bboxes(
+    source_elements: list, occurrences: list
+) -> None:
+    """Fill in `bbox` on SourceStructElement entries that don't have one.
+
+    For each element with bbox=None, look up any ImageOccurrence whose mcid
+    is in the element's mcids list and adopt that occurrence's page_bbox.
+    Mutates source_elements in place. Idempotent for elements that already
+    have a bbox.
+    """
+    by_mcid = {o.mcid: o for o in occurrences if o.mcid is not None}
+    for elem in source_elements:
+        if elem.bbox is not None:
+            continue
+        for m in elem.mcids:
+            occ = by_mcid.get(m)
+            if occ is not None:
+                elem.bbox = occ.page_bbox
+                break

@@ -478,5 +478,39 @@ class TestFormXObjectDescent(unittest.TestCase):
         self.assertTrue(result[0].in_watermark_ancestor)
 
 
+class TestBboxDerivation(unittest.TestCase):
+    """SourceStructElements without /BBox get one from their MCID-matched occurrence."""
+
+    def test_bbox_derived_from_mcid_region(self):
+        from image_reconciliation import _derive_source_bboxes
+        elem = SourceStructElement(
+            struct_type="/Figure", alt_text="Photo", page_index=0,
+            mcids=[5], bbox=None,
+        )
+        occ = ImageOccurrence(
+            xobject_name="/Im0",
+            page_bbox=BBox(100, 200, 300, 400),
+            mcid=5,
+        )
+        _derive_source_bboxes([elem], [occ])
+        self.assertIsNotNone(elem.bbox)
+        self.assertEqual(
+            (elem.bbox.x0, elem.bbox.y0, elem.bbox.x1, elem.bbox.y1),
+            (100, 200, 300, 400),
+        )
+
+    def test_existing_bbox_preserved(self):
+        from image_reconciliation import _derive_source_bboxes
+        existing = BBox(1, 2, 3, 4)
+        elem = SourceStructElement(
+            struct_type="/Figure", alt_text="Photo", page_index=0,
+            mcids=[5], bbox=existing,
+        )
+        occ = ImageOccurrence(xobject_name="/Im0",
+                              page_bbox=BBox(100, 200, 300, 400), mcid=5)
+        _derive_source_bboxes([elem], [occ])
+        self.assertIs(elem.bbox, existing)
+
+
 if __name__ == "__main__":
     unittest.main()
