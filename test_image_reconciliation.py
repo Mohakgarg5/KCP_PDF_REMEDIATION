@@ -27,6 +27,8 @@ pikepdf_mod.Name = _NameFactory()
 pikepdf_mod.Array = list
 pikepdf_mod.Dictionary = MagicMock(side_effect=lambda d=None, **kw: d or kw)
 pikepdf_mod.Operator = MagicMock(side_effect=lambda s: s)
+pikepdf_mod.String = MagicMock(side_effect=lambda s: s)
+pikepdf_mod.Stream = MagicMock()
 pikepdf_mod.Pdf = MagicMock()
 pikepdf_mod.parse_content_stream = MagicMock(return_value=[])
 sys.modules["pikepdf"] = pikepdf_mod

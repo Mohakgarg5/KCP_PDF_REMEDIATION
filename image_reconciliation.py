@@ -21,6 +21,8 @@ import pikepdf
 
 from models import BBox
 
+__all__ = ["ResolvedImage", "reconcile_page_images"]
+
 logger = logging.getLogger(__name__)
 
 
@@ -48,7 +50,7 @@ class SourceStructElement:
     struct_type: str                # "/Figure" or "/Artifact"
     alt_text: str                   # "" if /Alt is missing
     page_index: int
-    mcids: list = field(default_factory=list)  # leaf integer kids in /K subtree
+    mcids: list[int] = field(default_factory=list)  # leaf integer kids in /K subtree
     bbox: Optional[BBox] = None     # from element's /BBox if present, else None
 
 
