@@ -49,9 +49,9 @@ def extract_document(pdf_path: str) -> DocumentContent:
     for page in raw_pages:
         page.text_blocks = _merge_split_blocks(page.text_blocks)
 
-    # Phase 3: Extract images via pikepdf
-    existing_alt_texts = _read_existing_alt_texts(pdf_path)
-    _extract_images(pdf_path, raw_pages, existing_alt_texts)
+    # Phase 3: Extract images via pikepdf (alt text + decorative status
+    # are resolved inside _extract_images via image_reconciliation).
+    _extract_images(pdf_path, raw_pages)
 
     # Phase 4: Detect the body font size (most common size)
     body_font_size = _detect_body_font_size(raw_pages)
@@ -718,137 +718,7 @@ def _detect_tables(page: PageContent, body_font_size: float = 12.0):
         ]
 
 
-def _read_existing_alt_texts(pdf_path: str) -> dict:
-    """Read existing /Alt text from /Figure elements in the PDF structure tree.
-
-    Returns a dict mapping page_index (int) -> list of alt-text strings in
-    document order.  Only non-empty /Alt values are stored.  If the PDF has
-    no structure tree (or it cannot be read), returns an empty dict.
-    """
-    result: dict = {}
-    try:
-        pdf = pikepdf.Pdf.open(pdf_path)
-        struct_root = pdf.Root.get("/StructTreeRoot")
-        if struct_root is None:
-            pdf.close()
-            return result
-
-        # Build a page-index lookup: (objgen) -> page index
-        page_id_to_idx = {page.objgen: idx for idx, page in enumerate(pdf.pages)}
-        visited: set = set()
-
-        def _walk(node):
-            """Recursively walk the structure tree and collect Figure alt texts."""
-            try:
-                # Use objgen for cycle detection (stable across references)
-                try:
-                    oid = node.objgen
-                except Exception:
-                    oid = id(node)
-                if oid in visited:
-                    return
-                visited.add(oid)
-
-                struct_type = node.get("/S")
-                if struct_type == pikepdf.Name("/Figure"):
-                    # Always record every Figure element — including those with
-                    # no /Alt — so positional indices stay aligned with XObject
-                    # iteration order.  Empty string means "no existing alt text;
-                    # use the generated fallback instead."
-                    raw_alt = node.get("/Alt")
-                    alt_str = str(raw_alt).strip() if raw_alt else ""
-
-                    # Determine which page this element belongs to by
-                    # following /Pg on the element or its first /K child.
-                    pg = node.get("/Pg")
-                    if pg is None:
-                        kids = node.get("/K")
-                        if kids is not None:
-                            if isinstance(kids, pikepdf.Array) and len(kids):
-                                first = kids[0]
-                            elif hasattr(kids, "get"):
-                                first = kids
-                            else:
-                                first = None
-                            try:
-                                pg = first.get("/Pg") if (first is not None and hasattr(first, "get")) else None
-                            except Exception:
-                                pg = None
-                    if pg is not None:
-                        try:
-                            page_idx = page_id_to_idx.get(pg.objgen)
-                            if page_idx is not None:
-                                result.setdefault(page_idx, []).append(alt_str)
-                        except Exception:
-                            pass
-
-                # Recurse into children
-                kids = node.get("/K")
-                if kids is None:
-                    return
-                if isinstance(kids, pikepdf.Array):
-                    for child in kids:
-                        try:
-                            if hasattr(child, "get"):
-                                _walk(child)
-                        except Exception:
-                            continue
-                elif isinstance(kids, pikepdf.Dictionary):
-                    _walk(kids)
-                # Integer kids are MCID leaf references — nothing to recurse into
-            except Exception:
-                pass
-
-        _walk(struct_root)
-        pdf.close()
-    except Exception as e:
-        logger.debug("Could not read existing alt texts: %s", e)
-
-    return result
-
-
-def _collect_images_recursive(resources, visited=None):
-    """Recursively yield (name, obj) for every Image XObject reachable from resources.
-
-    Descends into Form XObjects so images nested inside InDesign containers
-    (e.g. grouped figures, chart forms) are found regardless of nesting depth.
-    Cycle detection via visited set prevents infinite recursion on circular refs.
-    """
-    if visited is None:
-        visited = set()
-    if resources is None:
-        return
-    try:
-        xobjects = resources.get("/XObject")
-    except Exception:
-        return
-    if xobjects is None:
-        return
-
-    for name, obj in xobjects.items():
-        try:
-            if not hasattr(obj, "keys"):
-                continue
-            try:
-                obj_id = obj.objgen
-                if obj_id in visited:
-                    continue
-                visited.add(obj_id)
-            except Exception:
-                pass
-
-            subtype = obj.get("/Subtype")
-            if subtype == pikepdf.Name.Image:
-                yield (name, obj)
-            elif subtype == pikepdf.Name.Form:
-                form_resources = obj.get("/Resources")
-                if form_resources:
-                    yield from _collect_images_recursive(form_resources, visited)
-        except Exception:
-            continue
-
-
-def _extract_images(pdf_path: str, pages: list, existing_alt_texts: dict = None):
+def _extract_images(pdf_path: str, pages: list):
     """Extract images and reconcile their alt text + decorative status.
 
     Delegates classification (alt text, decorative, watermark) to
@@ -856,9 +726,6 @@ def _extract_images(pdf_path: str, pages: list, existing_alt_texts: dict = None)
     + position-based matching.  Image bytes are then rendered per Resolved
     occurrence so each ImageBlock carries: image_bytes, page bbox, alt_text,
     is_decorative.
-
-    The `existing_alt_texts` parameter is retained for backward compatibility
-    but ignored — reconciliation reads the struct tree directly.
     """
     from image_reconciliation import reconcile_page_images
 

@@ -243,106 +243,11 @@ class TestFix2FormXObjectAssFigure(unittest.TestCase):
 # Fix 3 — _read_existing_alt_texts + _extract_images: alt text alignment
 # ---------------------------------------------------------------------------
 
-class TestFix3AltTextAlignment(unittest.TestCase):
-    """Alt texts from the structure tree must be preserved; empty slots must
-    not shift good alt texts onto the wrong figures."""
-
-    def _make_figure_node(self, alt_text=None, page_obj=None):
-        """Return a mock structure tree Figure node."""
-        node = MagicMock()
-        node.get = MagicMock(side_effect=lambda key, *a: {
-            "/S": MagicMock(__eq__=lambda self, other: str(other) == "/Figure"),
-            "/Alt": MagicMock(__str__=lambda self: alt_text,
-                              __bool__=lambda self: bool(alt_text)) if alt_text else None,
-            "/Pg": page_obj,
-            "/K": None,
-        }.get(key))
-        try:
-            node.objgen = (id(node), 0)
-        except Exception:
-            pass
-        return node
-
-    def test_figures_without_alt_preserve_index_alignment(self):
-        """
-        Structure tree: [Figure(no alt), Figure("Good alt"), Figure(no alt)]
-        Expected page_alts: ["", "Good alt", ""]
-        Without the fix, page_alts would be ["Good alt"] and the good alt
-        would get assigned to the wrong (first) image.
-        """
-        from pdf_extractor import _read_existing_alt_texts
-
-        # Use the module-level _Name-based pikepdf stub (already in sys.modules)
-        import pikepdf as pk
-
-        page_mock = MagicMock()
-        page_mock.objgen = (1, 0)
-
-        def make_fig(alt_str):
-            n = MagicMock()
-            alt_obj = None
-            if alt_str is not None:
-                alt_obj = MagicMock()
-                alt_obj.__str__ = lambda self: alt_str
-                alt_obj.__bool__ = lambda self: bool(alt_str)
-
-            def _get(key, *a):
-                if key == "/S":
-                    return pk.Name("/Figure")
-                if key == "/Alt":
-                    return alt_obj
-                if key == "/Pg":
-                    return page_mock
-                if key == "/K":
-                    return None
-                return None
-
-            n.get = _get
-            n.objgen = (id(n), 0)
-            return n
-
-        fig_no_alt_1 = make_fig(None)
-        fig_good_alt = make_fig("Good alt text")
-        fig_no_alt_2 = make_fig(None)
-
-        struct_root = MagicMock()
-        struct_root.objgen = (0, 0)
-
-        def root_get(key, *a):
-            if key == "/S":
-                return None
-            if key == "/K":
-                return [fig_no_alt_1, fig_good_alt, fig_no_alt_2]
-            return None
-
-        struct_root.get = root_get
-
-        fake_pdf = MagicMock()
-        fake_pdf.Root.get = MagicMock(return_value=struct_root)
-        fake_pdf.pages = [page_mock]
-        fake_pdf.close = MagicMock()
-
-        with patch("pdf_extractor.pikepdf") as mock_pk:
-            mock_pk.Pdf.open.return_value = fake_pdf
-            mock_pk.Name = pk.Name          # use our real _NameFactory
-            mock_pk.Array = list
-
-            result = _read_existing_alt_texts("fake.pdf")
-
-        page_alts = result.get(0, [])
-        self.assertEqual(len(page_alts), 3,
-                         f"Expected 3 entries (one per Figure), got {len(page_alts)}: {page_alts}")
-        self.assertEqual(page_alts[0], "",
-                         "First figure (no alt) should be empty string")
-        self.assertEqual(page_alts[1], "Good alt text",
-                         "Second figure must keep its alt text")
-        self.assertEqual(page_alts[2], "",
-                         "Third figure (no alt) should be empty string")
-
-    # Note: test_extract_images_uses_nonempty_alt_only was removed when
-    # _extract_images was rewritten to delegate to image_reconciliation —
-    # the index-shift concern is now handled by struct-tree intent matching,
-    # covered by test_image_reconciliation.TestMatchingEngine.
+# TestFix3AltTextAlignment was removed in the image-alt-reconciliation
+# refactor — _read_existing_alt_texts and the index-based _extract_images
+# it tested were replaced by struct-tree intent matching in
+# image_reconciliation.  Equivalent coverage now lives in
+# test_image_reconciliation (TestStructTreeReader + TestMatchingEngine).
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +257,6 @@ if __name__ == "__main__":
     suite = unittest.TestSuite()
     suite.addTests(loader.loadTestsFromTestCase(TestFix1FirstPageHeaders))
     suite.addTests(loader.loadTestsFromTestCase(TestFix2FormXObjectAssFigure))
-    suite.addTests(loader.loadTestsFromTestCase(TestFix3AltTextAlignment))
 
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
