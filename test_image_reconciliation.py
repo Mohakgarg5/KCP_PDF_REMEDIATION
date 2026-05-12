@@ -57,5 +57,36 @@ class TestDataclasses(unittest.TestCase):
         self.assertFalse(occ.in_watermark_ancestor)
 
 
+class TestBBoxFromCtm(unittest.TestCase):
+    """CTM applied to unit square [0,1]×[0,1] -> axis-aligned page bbox."""
+
+    def test_identity_ctm(self):
+        from image_reconciliation import _bbox_from_ctm
+        # Identity: image-space corners map unchanged.
+        bbox = _bbox_from_ctm([1, 0, 0, 1, 0, 0])
+        self.assertEqual((bbox.x0, bbox.y0, bbox.x1, bbox.y1), (0, 0, 1, 1))
+
+    def test_scale_and_translate(self):
+        from image_reconciliation import _bbox_from_ctm
+        # 100×50 image at (200, 300): CTM = [100, 0, 0, 50, 200, 300]
+        bbox = _bbox_from_ctm([100, 0, 0, 50, 200, 300])
+        self.assertEqual((bbox.x0, bbox.y0, bbox.x1, bbox.y1),
+                         (200, 300, 300, 350))
+
+    def test_rotation_90_degrees(self):
+        from image_reconciliation import _bbox_from_ctm
+        # 90deg rotation: [0, 1, -1, 0, tx, ty] swaps width/height.
+        # Image at origin, 100×50, rotated 90deg, anchored so result starts at (0,0):
+        bbox = _bbox_from_ctm([0, 100, -50, 0, 50, 0])
+        # Corners map to: (50,0), (50,100), (0,0), (0,100) -> bbox (0,0)-(50,100)
+        self.assertEqual((bbox.x0, bbox.y0, bbox.x1, bbox.y1), (0, 0, 50, 100))
+
+    def test_negative_scale_flipped(self):
+        from image_reconciliation import _bbox_from_ctm
+        # Flipped horizontally: width=-100 anchored at x=300 spans (200,300)
+        bbox = _bbox_from_ctm([-100, 0, 0, 50, 300, 0])
+        self.assertEqual((bbox.x0, bbox.y0, bbox.x1, bbox.y1), (200, 0, 300, 50))
+
+
 if __name__ == "__main__":
     unittest.main()

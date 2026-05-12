@@ -61,3 +61,33 @@ class ImageOccurrence:
     page_bbox: BBox                       # CTM applied to unit-square image space
     mcid: Optional[int] = None            # innermost active MCID at this Do
     in_watermark_ancestor: bool = False   # True if any ancestor Form is a watermark
+
+
+# ---------------------------------------------------------------------------
+# CTM math
+# ---------------------------------------------------------------------------
+
+def _apply_ctm(ctm: list, x: float, y: float) -> tuple:
+    """Apply 6-element CTM [a, b, c, d, e, f] to (x, y).
+
+    Per PDF spec: x' = a*x + c*y + e;  y' = b*x + d*y + f.
+    """
+    a, b, c, d, e, f = ctm
+    return (a * x + c * y + e, b * x + d * y + f)
+
+
+def _bbox_from_ctm(ctm: list) -> BBox:
+    """Compute axis-aligned page-space bbox of the unit-square image after CTM.
+
+    Maps all four image-space corners (0,0),(1,0),(0,1),(1,1) through the
+    CTM and takes min/max — handles rotation, skew, and negative scales.
+    """
+    corners = [
+        _apply_ctm(ctm, 0.0, 0.0),
+        _apply_ctm(ctm, 1.0, 0.0),
+        _apply_ctm(ctm, 0.0, 1.0),
+        _apply_ctm(ctm, 1.0, 1.0),
+    ]
+    xs = [p[0] for p in corners]
+    ys = [p[1] for p in corners]
+    return BBox(x0=min(xs), y0=min(ys), x1=max(xs), y1=max(ys))
