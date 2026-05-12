@@ -339,69 +339,10 @@ class TestFix3AltTextAlignment(unittest.TestCase):
         self.assertEqual(page_alts[2], "",
                          "Third figure (no alt) should be empty string")
 
-    def test_extract_images_uses_nonempty_alt_only(self):
-        """
-        page_alts = ["", "Good alt", ""]
-        Image at index 1 must get "Good alt"; images at 0 and 2 get generic fallback.
-        Tests the alt-text selection logic in _extract_images directly.
-        """
-        import pikepdf as pk
-        from pdf_extractor import _extract_images
-        from models import PageContent
-
-        IMAGE_SUBTYPE = pk.Name("/Image")
-
-        def make_xobj():
-            obj = MagicMock()
-            obj.keys = lambda: []
-            obj.get = lambda k, *a: IMAGE_SUBTYPE if k == "/Subtype" else None
-            return obj
-
-        xobjects = {"Im0": make_xobj(), "Im1": make_xobj(), "Im2": make_xobj()}
-
-        resources_mock = MagicMock()
-        resources_mock.get = lambda k, *a: xobjects if k == "/XObject" else None
-
-        fake_page = MagicMock()
-        fake_page.get = lambda k, *a: resources_mock if k == "/Resources" else None
-
-        fake_pdf_obj = MagicMock()
-        fake_pdf_obj.pages = [fake_page]
-        fake_pdf_obj.close = MagicMock()
-
-        page_content = PageContent(page_number=0, width=612, height=792)
-        existing_alt_texts = {0: ["", "Good alt", ""]}
-
-        def fake_pdfimage(obj):
-            m = MagicMock()
-            m.width = 100
-            m.height = 100
-            img_mock = MagicMock()
-            img_mock.save = MagicMock()
-            m.as_pil_image = MagicMock(return_value=img_mock)
-            return m
-
-        with patch("pdf_extractor.pikepdf") as mock_pk, \
-             patch("pdf_extractor.BytesIO") as mock_bio:
-            mock_pk.Pdf.open.return_value = fake_pdf_obj
-            mock_pk.Name = pk.Name           # real _NameFactory for comparisons
-            mock_pk.PdfImage = fake_pdfimage
-
-            buf = MagicMock()
-            buf.getvalue.return_value = b"bytes"
-            mock_bio.return_value = buf
-
-            _extract_images("fake.pdf", [page_content],
-                            existing_alt_texts=existing_alt_texts)
-
-        alts = [img.alt_text for img in page_content.images]
-        self.assertEqual(len(alts), 3, f"Expected 3 images, got {len(alts)}: {alts}")
-        self.assertNotEqual(alts[0], "Good alt",
-                            "Image 0 must NOT get 'Good alt' (index-shift bug)")
-        self.assertEqual(alts[1], "Good alt",
-                         "Image 1 must get the preserved 'Good alt'")
-        self.assertIn("Figure", alts[2],
-                      "Image 2 must get a generic fallback containing 'Figure'")
+    # Note: test_extract_images_uses_nonempty_alt_only was removed when
+    # _extract_images was rewritten to delegate to image_reconciliation —
+    # the index-shift concern is now handled by struct-tree intent matching,
+    # covered by test_image_reconciliation.TestMatchingEngine.
 
 
 # ---------------------------------------------------------------------------

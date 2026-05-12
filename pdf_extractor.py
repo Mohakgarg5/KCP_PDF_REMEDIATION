@@ -849,92 +849,110 @@ def _collect_images_recursive(resources, visited=None):
 
 
 def _extract_images(pdf_path: str, pages: list, existing_alt_texts: dict = None):
-    """Extract images from PDF using pikepdf."""
+    """Extract images and reconcile their alt text + decorative status.
+
+    Delegates classification (alt text, decorative, watermark) to
+    image_reconciliation.reconcile_page_images, which uses source-tree intent
+    + position-based matching.  Image bytes are then rendered per Resolved
+    occurrence so each ImageBlock carries: image_bytes, page bbox, alt_text,
+    is_decorative.
+
+    The `existing_alt_texts` parameter is retained for backward compatibility
+    but ignored — reconciliation reads the struct tree directly.
+    """
+    from image_reconciliation import reconcile_page_images
+
     try:
         pdf = pikepdf.Pdf.open(pdf_path)
     except Exception as e:
         logger.warning("Could not open PDF for image extraction: %s", e)
         return
 
-    for page_idx, pdf_page in enumerate(pdf.pages):
-        if page_idx >= len(pages):
-            break
+    resolved_by_page = reconcile_page_images(pdf_path)
 
-        page_content = pages[page_idx]
-        img_index = 0
-
+    def _collect_image_xobjects(resources, lookup, seen):
+        """Recursive: gather every Image XObject reachable from `resources`."""
+        if resources is None:
+            return
         try:
-            # Check page Resources and inherited Resources
-            resources = pdf_page.get("/Resources")
-            if resources is None:
-                parent = pdf_page.get("/Parent")
-                while parent and resources is None:
-                    resources = parent.get("/Resources")
-                    parent = parent.get("/Parent")
-            if resources is None:
-                continue
-        except Exception as e:
-            logger.warning("Could not read resources on page %d: %s", page_idx, e)
-            continue
-
-        for name, obj in _collect_images_recursive(resources):
+            xobjects = resources.get("/XObject")
+        except Exception:
+            return
+        if xobjects is None:
+            return
+        for n, o in xobjects.items():
             try:
-                pdfimage = pikepdf.PdfImage(obj)
-                pil_image = pdfimage.as_pil_image()
-                buf = BytesIO()
-                img_format = "PNG"
-                pil_image.save(buf, format=img_format)
+                ogen = getattr(o, "objgen", None)
+                if ogen and ogen in seen:
+                    continue
+                if ogen:
+                    seen.add(ogen)
+                sub = o.get("/Subtype")
+                if sub == pikepdf.Name("/Image"):
+                    lookup.setdefault(str(n), o)
+                elif sub == pikepdf.Name("/Form"):
+                    inner = o.get("/Resources")
+                    if inner is not None:
+                        _collect_image_xobjects(inner, lookup, seen)
+            except Exception:
+                continue
 
-                # Use existing alt-text from the PDF structure tree when present;
-                # only fall back to a generic placeholder when it is missing.
-                # Empty string entries in page_alts mean the original Figure had
-                # no /Alt — generate a placeholder rather than writing blank alt text.
-                page_alts = (existing_alt_texts or {}).get(page_idx, [])
-                existing = page_alts[img_index] if img_index < len(page_alts) else ""
-                alt_text = existing if existing else f"Figure {img_index + 1} on page {page_idx + 1}"
+    try:
+        for page_idx, pdf_page in enumerate(pdf.pages):
+            if page_idx >= len(pages):
+                break
+            page_content = pages[page_idx]
 
-                image_block = ImageBlock(
-                    image_bytes=buf.getvalue(),
-                    format=img_format.lower(),
-                    bbox=BBox(0, 0, pdfimage.width, pdfimage.height),
+            page_resolved = resolved_by_page.get(page_idx)
+            if page_resolved is None:
+                # Reconciliation skipped this page (failure or empty);
+                # leave page_content.images as pdfminer populated it.
+                continue
+
+            # Look up rendered image bytes by xobject name on this page,
+            # descending into Form XObjects to reach nested Image data.
+            xobj_lookup: dict = {}
+            try:
+                resources = pdf_page.get("/Resources")
+                if resources is None:
+                    parent = pdf_page.get("/Parent")
+                    while parent is not None and resources is None:
+                        resources = parent.get("/Resources")
+                        parent = parent.get("/Parent")
+                _collect_image_xobjects(resources, xobj_lookup, set())
+            except Exception:
+                pass
+
+            new_blocks: list = []
+            for resolved in page_resolved:
+                img_obj = xobj_lookup.get(resolved.xobject_name)
+                image_bytes = b""
+                fmt = ""
+                if img_obj is not None:
+                    try:
+                        pdfimage = pikepdf.PdfImage(img_obj)
+                        pil_image = pdfimage.as_pil_image()
+                        buf = BytesIO()
+                        pil_image.save(buf, format="PNG")
+                        image_bytes = buf.getvalue()
+                        fmt = "png"
+                    except Exception as e:
+                        logger.debug(
+                            "Could not render image '%s' on page %d: %s",
+                            resolved.xobject_name, page_idx, e,
+                        )
+                new_blocks.append(ImageBlock(
+                    image_bytes=image_bytes,
+                    format=fmt,
+                    bbox=resolved.bbox,
                     page_number=page_idx,
-                    alt_text=alt_text,
-                    is_decorative=False,
-                )
+                    alt_text=resolved.alt_text,
+                    is_decorative=resolved.is_decorative,
+                ))
 
-                if img_index < len(page_content.images):
-                    image_block.bbox = page_content.images[img_index].bbox
-                    page_content.images[img_index] = image_block
-                else:
-                    page_content.images.append(image_block)
-
-                img_index += 1
-            except Exception as e:
-                logger.debug("Could not extract image '%s' on page %d: %s",
-                             name, page_idx, e)
-                continue
-
-        # After processing all XObjects on this page, create vector figure
-        # placeholders for any alt-texts that had no matching Image XObject.
-        # These come from figures that are pure vector graphics (Form XObjects).
-        # Skip empty-string entries — those are raster figures that lacked /Alt
-        # and were recorded only to preserve positional alignment.
-        page_alts = (existing_alt_texts or {}).get(page_idx, [])
-        for extra_alt in page_alts[img_index:]:
-            if not extra_alt:
-                continue
-            vector_block = ImageBlock(
-                image_bytes=b"",
-                format="",
-                bbox=BBox(0, 0, 0, 0),
-                page_number=page_idx,
-                alt_text=extra_alt,
-                is_decorative=False,
-                is_vector_figure=True,
-            )
-            page_content.images.append(vector_block)
-
-    pdf.close()
+            page_content.images = new_blocks
+    finally:
+        pdf.close()
 
 
 def _extract_filled_rects(pdf_path: str, page_count: int) -> list:
