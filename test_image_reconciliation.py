@@ -88,5 +88,77 @@ class TestBBoxFromCtm(unittest.TestCase):
         self.assertEqual((bbox.x0, bbox.y0, bbox.x1, bbox.y1), (200, 0, 300, 50))
 
 
+class TestStructTreeReader(unittest.TestCase):
+    """Walks /StructTreeRoot and collects /Figure + /Artifact elements."""
+
+    def _make_pdf_with_struct_tree(self, page_obj, figure_elements):
+        """Build a mock pikepdf.Pdf with a struct tree.
+
+        figure_elements: list of dicts {struct_type, alt, mcids, bbox(optional)}.
+        """
+        Name = pikepdf_mod.Name
+
+        kids = []
+        for fe in figure_elements:
+            mcid_kids = list(fe.get("mcids", []))
+            elem = MagicMock()
+            data = {
+                "/S": Name(fe["struct_type"]),
+                "/Pg": page_obj,
+                "/K": pikepdf_mod.Array(mcid_kids),
+            }
+            if fe.get("alt"):
+                data["/Alt"] = fe["alt"]
+            if fe.get("bbox"):
+                data["/BBox"] = fe["bbox"]
+            elem.get.side_effect = data.get
+            elem.objgen = (id(elem), 0)
+            kids.append(elem)
+
+        struct_root = MagicMock()
+        struct_root.get.side_effect = {"/K": pikepdf_mod.Array(kids)}.get
+        struct_root.objgen = (1, 0)
+
+        pdf = MagicMock()
+        pdf.Root.get.side_effect = {"/StructTreeRoot": struct_root}.get
+        pdf.pages = [page_obj]
+        # Provide a page_id_to_idx mapping shape
+        page_obj.objgen = (2, 0)
+        return pdf
+
+    def test_collects_figure_with_alt(self):
+        from image_reconciliation import _read_source_struct_elements
+        page = MagicMock()
+        pdf = self._make_pdf_with_struct_tree(page, [
+            {"struct_type": "/Figure", "alt": "Photo 1", "mcids": [10]},
+        ])
+        result = _read_source_struct_elements(pdf)
+        self.assertEqual(len(result[0]), 1)
+        elem = result[0][0]
+        self.assertEqual(elem.struct_type, "/Figure")
+        self.assertEqual(elem.alt_text, "Photo 1")
+        self.assertEqual(elem.mcids, [10])
+        self.assertIsNone(elem.bbox)
+
+    def test_collects_artifact(self):
+        from image_reconciliation import _read_source_struct_elements
+        page = MagicMock()
+        pdf = self._make_pdf_with_struct_tree(page, [
+            {"struct_type": "/Artifact", "mcids": [5]},
+        ])
+        result = _read_source_struct_elements(pdf)
+        elem = result[0][0]
+        self.assertEqual(elem.struct_type, "/Artifact")
+        self.assertEqual(elem.alt_text, "")
+        self.assertEqual(elem.mcids, [5])
+
+    def test_no_struct_tree_returns_empty(self):
+        from image_reconciliation import _read_source_struct_elements
+        pdf = MagicMock()
+        pdf.Root.get.side_effect = {"/StructTreeRoot": None}.get
+        result = _read_source_struct_elements(pdf)
+        self.assertEqual(result, {})
+
+
 if __name__ == "__main__":
     unittest.main()

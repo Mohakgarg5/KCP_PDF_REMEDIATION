@@ -91,3 +91,152 @@ def _bbox_from_ctm(ctm: list[float]) -> BBox:
     xs = [p[0] for p in corners]
     ys = [p[1] for p in corners]
     return BBox(x0=min(xs), y0=min(ys), x1=max(xs), y1=max(ys))
+
+
+# ---------------------------------------------------------------------------
+# Struct tree reader
+# ---------------------------------------------------------------------------
+
+def _collect_leaf_mcids(node, visited):
+    """Walk node's /K subtree, return all integer MCID leaves."""
+    mcids = []
+    try:
+        oid = node.objgen if hasattr(node, "objgen") else id(node)
+    except Exception:
+        oid = id(node)
+    if oid in visited:
+        return mcids
+    visited.add(oid)
+
+    try:
+        kids = node.get("/K")
+    except Exception:
+        return mcids
+    if kids is None:
+        return mcids
+
+    if isinstance(kids, int):
+        return [kids]
+    if isinstance(kids, list) or isinstance(kids, pikepdf.Array):
+        for child in kids:
+            if isinstance(child, int):
+                mcids.append(child)
+            elif hasattr(child, "get"):
+                mcids.extend(_collect_leaf_mcids(child, visited))
+        return mcids
+    if hasattr(kids, "get"):
+        return _collect_leaf_mcids(kids, visited)
+    return mcids
+
+
+def _bbox_from_pdf_array(arr) -> Optional[BBox]:
+    """Convert a 4-element pikepdf Array [x0, y0, x1, y1] to BBox, or None."""
+    try:
+        if arr is None or len(arr) < 4:
+            return None
+        return BBox(x0=float(arr[0]), y0=float(arr[1]),
+                    x1=float(arr[2]), y1=float(arr[3]))
+    except Exception:
+        return None
+
+
+def _read_source_struct_elements(pdf) -> dict:
+    """Walk /StructTreeRoot, return {page_index: [SourceStructElement, ...]}.
+
+    Collects /Figure AND /Artifact nodes. Empty result when struct tree is absent.
+    """
+    result: dict = {}
+    try:
+        struct_root = pdf.Root.get("/StructTreeRoot")
+        if struct_root is None:
+            return result
+
+        # Build page-index lookup
+        try:
+            page_id_to_idx = {p.objgen: i for i, p in enumerate(pdf.pages)}
+        except Exception:
+            page_id_to_idx = {}
+
+        visited = set()
+        FIGURE = pikepdf.Name("/Figure")
+        ARTIFACT = pikepdf.Name("/Artifact")
+
+        def _walk(node, inherited_pg=None):
+            try:
+                oid = node.objgen if hasattr(node, "objgen") else id(node)
+            except Exception:
+                oid = id(node)
+            if oid in visited:
+                return
+            visited.add(oid)
+
+            try:
+                struct_type = node.get("/S")
+            except Exception:
+                struct_type = None
+            pg = None
+            try:
+                pg = node.get("/Pg") or inherited_pg
+            except Exception:
+                pg = inherited_pg
+
+            if struct_type == FIGURE or struct_type == ARTIFACT:
+                # Resolve /Alt
+                raw_alt = None
+                try:
+                    raw_alt = node.get("/Alt")
+                except Exception:
+                    pass
+                alt_str = str(raw_alt).strip() if raw_alt else ""
+
+                # Resolve /BBox (rare on Figures from Word; common on Acrobat-edited)
+                bbox = None
+                try:
+                    bbox = _bbox_from_pdf_array(node.get("/BBox"))
+                except Exception:
+                    pass
+
+                # MCIDs — fresh visited set so we walk every leaf even on shared dicts
+                mcids = _collect_leaf_mcids(node, set())
+
+                # Determine page
+                page_idx = None
+                if pg is not None:
+                    try:
+                        page_idx = page_id_to_idx.get(pg.objgen)
+                    except Exception:
+                        page_idx = None
+                if page_idx is None and mcids:
+                    # Fallback: use first page (rare)
+                    page_idx = 0
+
+                if page_idx is not None:
+                    elem = SourceStructElement(
+                        struct_type=("/Artifact" if struct_type == ARTIFACT else "/Figure"),
+                        alt_text=alt_str,
+                        page_index=page_idx,
+                        mcids=mcids,
+                        bbox=bbox,
+                    )
+                    result.setdefault(page_idx, []).append(elem)
+                return  # Figure/Artifact subtree already harvested
+
+            # Recurse into children
+            try:
+                kids = node.get("/K")
+            except Exception:
+                kids = None
+            if kids is None:
+                return
+            if isinstance(kids, list) or isinstance(kids, pikepdf.Array):
+                for child in kids:
+                    if hasattr(child, "get"):
+                        _walk(child, inherited_pg=pg)
+            elif hasattr(kids, "get"):
+                _walk(kids, inherited_pg=pg)
+
+        _walk(struct_root)
+    except Exception as e:
+        logger.debug("Struct tree walk failed: %s", e)
+
+    return result
