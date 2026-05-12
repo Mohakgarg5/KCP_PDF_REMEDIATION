@@ -512,5 +512,65 @@ class TestBboxDerivation(unittest.TestCase):
         self.assertIs(elem.bbox, existing)
 
 
+class TestMatchingEngine(unittest.TestCase):
+    """Resolves ImageOccurrence → ResolvedImage via 4-priority chain."""
+
+    def test_watermark_wins(self):
+        from image_reconciliation import _match_occurrences_to_sources
+        occ = ImageOccurrence("/Im0", BBox(0, 0, 100, 100), 7, True)
+        src = SourceStructElement("/Figure", "Real Alt", 0, [7])
+        results = _match_occurrences_to_sources([occ], [src], page_height=800)
+        self.assertTrue(results[0].is_watermark)
+        self.assertTrue(results[0].is_decorative)
+        self.assertEqual(results[0].alt_text, "")
+
+    def test_mcid_match_to_figure(self):
+        from image_reconciliation import _match_occurrences_to_sources
+        occ = ImageOccurrence("/Im0", BBox(0, 0, 100, 100), mcid=5)
+        src = SourceStructElement("/Figure", "Photo 1", 0, [5])
+        results = _match_occurrences_to_sources([occ], [src], 800)
+        self.assertEqual(results[0].alt_text, "Photo 1")
+        self.assertFalse(results[0].is_decorative)
+
+    def test_mcid_match_to_artifact_is_decorative(self):
+        from image_reconciliation import _match_occurrences_to_sources
+        occ = ImageOccurrence("/Im0", BBox(0, 0, 100, 100), mcid=9)
+        src = SourceStructElement("/Artifact", "", 0, [9])
+        results = _match_occurrences_to_sources([occ], [src], 800)
+        self.assertTrue(results[0].is_decorative)
+        self.assertEqual(results[0].alt_text, "")
+
+    def test_bbox_overlap_match(self):
+        from image_reconciliation import _match_occurrences_to_sources
+        occ = ImageOccurrence("/Im0", BBox(100, 100, 200, 200))
+        src = SourceStructElement("/Figure", "Photo", 0, [],
+                                  bbox=BBox(95, 95, 205, 205))
+        results = _match_occurrences_to_sources([occ], [src], 800)
+        self.assertEqual(results[0].alt_text, "Photo")
+
+    def test_source_claimed_at_most_once(self):
+        from image_reconciliation import _match_occurrences_to_sources
+        occ_a = ImageOccurrence("/Im0", BBox(100, 100, 200, 200))
+        occ_b = ImageOccurrence("/Im1", BBox(101, 101, 201, 201))
+        src = SourceStructElement("/Figure", "P", 0, [],
+                                  bbox=BBox(100, 100, 200, 200))
+        results = _match_occurrences_to_sources([occ_a, occ_b], [src], 800)
+        self.assertEqual(sum(1 for r in results if r.alt_text == "P"), 1)
+
+    def test_no_match_header_band_decorative(self):
+        from image_reconciliation import _match_occurrences_to_sources
+        # Page 800, header band = y > 720
+        occ = ImageOccurrence("/Im0", BBox(50, 750, 200, 790))
+        results = _match_occurrences_to_sources([occ], [], 800)
+        self.assertTrue(results[0].is_decorative)
+
+    def test_no_match_body_not_decorative(self):
+        from image_reconciliation import _match_occurrences_to_sources
+        occ = ImageOccurrence("/Im0", BBox(50, 400, 200, 500))
+        results = _match_occurrences_to_sources([occ], [], 800)
+        self.assertFalse(results[0].is_decorative)
+        self.assertEqual(results[0].alt_text, "")
+
+
 if __name__ == "__main__":
     unittest.main()

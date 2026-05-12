@@ -548,3 +548,107 @@ def _derive_source_bboxes(
             if occ is not None:
                 elem.bbox = occ.page_bbox
                 break
+
+
+# ---------------------------------------------------------------------------
+# Matching engine
+# ---------------------------------------------------------------------------
+
+def _bbox_iou(a: BBox, b: BBox) -> float:
+    """Intersection-over-union of two BBoxes; 0.0 if no overlap."""
+    ix0 = max(a.x0, b.x0)
+    iy0 = max(a.y0, b.y0)
+    ix1 = min(a.x1, b.x1)
+    iy1 = min(a.y1, b.y1)
+    iw = max(0.0, ix1 - ix0)
+    ih = max(0.0, iy1 - iy0)
+    inter = iw * ih
+    if inter == 0:
+        return 0.0
+    aw = max(0.0, a.x1 - a.x0)
+    ah = max(0.0, a.y1 - a.y0)
+    bw = max(0.0, b.x1 - b.x0)
+    bh = max(0.0, b.y1 - b.y0)
+    union = aw * ah + bw * bh - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _match_occurrences_to_sources(
+    occurrences: list,
+    sources: list,
+    page_height: float,
+) -> list:
+    """Pair each ImageOccurrence with a SourceStructElement via priority chain.
+
+    Priority:
+      1. in_watermark_ancestor    → is_decorative=True, is_watermark=True
+      2. MCID match               → use source intent (Figure: announce alt;
+                                                       Artifact: decorative)
+      3. Bbox overlap (IoU >= 0.5), greedy + each source claimed at most once
+      4. No match in header band (y_center > 90% page_height) or footer band
+         (y_center < 10%)        → is_decorative=True (header/footer ornament)
+      5. No match in body region  → is_decorative=False, alt_text=""
+                                   (downstream tagger handles fallback)
+
+    Returns list of ResolvedImage in same order as `occurrences`.
+    """
+    results: list[Optional[ResolvedImage]] = [None] * len(occurrences)
+    claimed_source_ids: set[int] = set()
+
+    mcid_to_src = {}
+    for src in sources:
+        for m in src.mcids:
+            mcid_to_src[m] = src
+
+    # Pass 1: watermark + MCID
+    for i, occ in enumerate(occurrences):
+        if occ.in_watermark_ancestor:
+            results[i] = ResolvedImage(
+                xobject_name=occ.xobject_name, bbox=occ.page_bbox,
+                alt_text="", is_decorative=True, is_watermark=True,
+            )
+            continue
+        if occ.mcid is not None and occ.mcid in mcid_to_src:
+            src = mcid_to_src[occ.mcid]
+            results[i] = ResolvedImage(
+                xobject_name=occ.xobject_name, bbox=occ.page_bbox,
+                alt_text=src.alt_text,
+                is_decorative=(src.struct_type == "/Artifact"),
+            )
+            claimed_source_ids.add(id(src))
+
+    # Pass 2: bbox overlap (IoU >= 0.5), greedy
+    for i, occ in enumerate(occurrences):
+        if results[i] is not None:
+            continue
+        best_iou = 0.0
+        best_src = None
+        for src in sources:
+            if id(src) in claimed_source_ids or src.bbox is None:
+                continue
+            iou = _bbox_iou(occ.page_bbox, src.bbox)
+            if iou >= 0.5 and iou > best_iou:
+                best_iou = iou
+                best_src = src
+        if best_src is not None:
+            results[i] = ResolvedImage(
+                xobject_name=occ.xobject_name, bbox=occ.page_bbox,
+                alt_text=best_src.alt_text,
+                is_decorative=(best_src.struct_type == "/Artifact"),
+            )
+            claimed_source_ids.add(id(best_src))
+
+    # Pass 3: heuristic fallback
+    header_threshold = page_height * 0.9
+    footer_threshold = page_height * 0.1
+    for i, occ in enumerate(occurrences):
+        if results[i] is not None:
+            continue
+        y_center = (occ.page_bbox.y0 + occ.page_bbox.y1) / 2
+        in_band = y_center > header_threshold or y_center < footer_threshold
+        results[i] = ResolvedImage(
+            xobject_name=occ.xobject_name, bbox=occ.page_bbox,
+            alt_text="", is_decorative=in_band,
+        )
+
+    return results  # type: ignore[return-value]
