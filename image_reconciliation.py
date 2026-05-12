@@ -97,13 +97,30 @@ def _bbox_from_ctm(ctm: list[float]) -> BBox:
 # Struct tree reader
 # ---------------------------------------------------------------------------
 
-def _collect_leaf_mcids(node, visited):
-    """Walk node's /K subtree, return all integer MCID leaves."""
-    mcids = []
+def _mcr_mcid(node) -> Optional[int]:
+    """If node is an MCR dict ({/Type /MCR, /MCID int}), return its MCID; else None.
+
+    MCR is the indirect form of an MCID leaf (PDF 1.7 §10.5.2). Plain int kids
+    are the direct form. Both must be collected.
+    """
     try:
-        oid = node.objgen if hasattr(node, "objgen") else id(node)
+        mcid_val = node.get("/MCID")
+        if mcid_val is None:
+            return None
+        return int(mcid_val)
     except Exception:
-        oid = id(node)
+        return None
+
+
+def _collect_leaf_mcids(node, visited: set) -> list[int]:
+    """Walk node's /K subtree, return all MCID leaves.
+
+    Handles both leaf encodings: direct (plain int in /K) and indirect
+    (MCR dict). Uses id(node) for cycle detection — pikepdf inline dicts
+    share objgen=(0,0), so objgen-based dedup conflates unrelated nodes.
+    """
+    mcids: list[int] = []
+    oid = id(node)
     if oid in visited:
         return mcids
     visited.add(oid)
@@ -122,9 +139,17 @@ def _collect_leaf_mcids(node, visited):
             if isinstance(child, int):
                 mcids.append(child)
             elif hasattr(child, "get"):
-                mcids.extend(_collect_leaf_mcids(child, visited))
+                # MCR dict leaf first; otherwise recurse into struct subtree
+                mcr_id = _mcr_mcid(child)
+                if mcr_id is not None:
+                    mcids.append(mcr_id)
+                else:
+                    mcids.extend(_collect_leaf_mcids(child, visited))
         return mcids
     if hasattr(kids, "get"):
+        mcr_id = _mcr_mcid(kids)
+        if mcr_id is not None:
+            return [mcr_id]
         return _collect_leaf_mcids(kids, visited)
     return mcids
 
@@ -140,12 +165,12 @@ def _bbox_from_pdf_array(arr) -> Optional[BBox]:
         return None
 
 
-def _read_source_struct_elements(pdf) -> dict:
+def _read_source_struct_elements(pdf) -> dict[int, list[SourceStructElement]]:
     """Walk /StructTreeRoot, return {page_index: [SourceStructElement, ...]}.
 
     Collects /Figure AND /Artifact nodes. Empty result when struct tree is absent.
     """
-    result: dict = {}
+    result: dict[int, list[SourceStructElement]] = {}
     try:
         struct_root = pdf.Root.get("/StructTreeRoot")
         if struct_root is None:
@@ -156,16 +181,19 @@ def _read_source_struct_elements(pdf) -> dict:
             page_id_to_idx = {p.objgen: i for i, p in enumerate(pdf.pages)}
         except Exception:
             page_id_to_idx = {}
+        if not page_id_to_idx:
+            logger.warning(
+                "Could not build page-index lookup; struct elements may default to page 0"
+            )
 
-        visited = set()
+        visited: set[int] = set()
         FIGURE = pikepdf.Name("/Figure")
         ARTIFACT = pikepdf.Name("/Artifact")
 
         def _walk(node, inherited_pg=None):
-            try:
-                oid = node.objgen if hasattr(node, "objgen") else id(node)
-            except Exception:
-                oid = id(node)
+            # Use id() rather than objgen — inline dicts share objgen=(0,0)
+            # in pikepdf, which would conflate unrelated nodes.
+            oid = id(node)
             if oid in visited:
                 return
             visited.add(oid)

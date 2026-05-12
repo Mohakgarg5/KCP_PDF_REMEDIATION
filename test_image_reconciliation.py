@@ -159,6 +159,120 @@ class TestStructTreeReader(unittest.TestCase):
         result = _read_source_struct_elements(pdf)
         self.assertEqual(result, {})
 
+    def test_collects_mcr_dict_child_as_mcid(self):
+        """MCR dict ({/Type /MCR, /MCID 5}) is the indirect form of an MCID leaf.
+
+        Acrobat-edited PDFs frequently use this form when content spans a
+        referenced Form XObject. The walker must extract the /MCID instead of
+        recursing into the MCR's (absent) /K subtree.
+        """
+        from image_reconciliation import _read_source_struct_elements
+        Name = pikepdf_mod.Name
+        page = MagicMock()
+        page.objgen = (2, 0)
+
+        # MCR dict — has /MCID but no /K
+        mcr = MagicMock()
+        mcr.get.side_effect = {
+            "/Type": Name("/MCR"),
+            "/MCID": 42,
+            "/Pg": page,
+        }.get
+        mcr.objgen = (0, 0)  # inline — would collide on objgen-based dedup
+
+        # Figure whose /K contains the MCR dict (not a plain int)
+        fig = MagicMock()
+        fig.get.side_effect = {
+            "/S": Name("/Figure"),
+            "/Pg": page,
+            "/Alt": "Form-spanned figure",
+            "/K": pikepdf_mod.Array([mcr]),
+        }.get
+        fig.objgen = (0, 0)  # also inline
+
+        struct_root = MagicMock()
+        struct_root.get.side_effect = {"/K": pikepdf_mod.Array([fig])}.get
+        struct_root.objgen = (1, 0)
+
+        pdf = MagicMock()
+        pdf.Root.get.side_effect = {"/StructTreeRoot": struct_root}.get
+        pdf.pages = [page]
+
+        result = _read_source_struct_elements(pdf)
+        self.assertEqual(len(result[0]), 1)
+        self.assertEqual(result[0][0].mcids, [42])
+
+    def test_inline_struct_elements_not_conflated(self):
+        """Two inline (objgen=(0,0)) Figures must both be collected.
+
+        Regression guard for the bug where objgen-based cycle detection
+        treated all inline dicts as a single visited node.
+        """
+        from image_reconciliation import _read_source_struct_elements
+        Name = pikepdf_mod.Name
+        page = MagicMock()
+        page.objgen = (2, 0)
+
+        fig1 = MagicMock()
+        fig1.get.side_effect = {
+            "/S": Name("/Figure"), "/Pg": page, "/Alt": "First",
+            "/K": pikepdf_mod.Array([10]),
+        }.get
+        fig1.objgen = (0, 0)
+
+        fig2 = MagicMock()
+        fig2.get.side_effect = {
+            "/S": Name("/Figure"), "/Pg": page, "/Alt": "Second",
+            "/K": pikepdf_mod.Array([11]),
+        }.get
+        fig2.objgen = (0, 0)  # same objgen as fig1 — must not collide
+
+        struct_root = MagicMock()
+        struct_root.get.side_effect = {"/K": pikepdf_mod.Array([fig1, fig2])}.get
+        struct_root.objgen = (1, 0)
+
+        pdf = MagicMock()
+        pdf.Root.get.side_effect = {"/StructTreeRoot": struct_root}.get
+        pdf.pages = [page]
+
+        result = _read_source_struct_elements(pdf)
+        self.assertEqual(len(result[0]), 2)
+        alts = sorted(e.alt_text for e in result[0])
+        self.assertEqual(alts, ["First", "Second"])
+
+    def test_nested_containers_recursed(self):
+        """Figures nested inside non-Figure containers (e.g., Sect/Div) are found."""
+        from image_reconciliation import _read_source_struct_elements
+        Name = pikepdf_mod.Name
+        page = MagicMock()
+        page.objgen = (2, 0)
+
+        fig = MagicMock()
+        fig.get.side_effect = {
+            "/S": Name("/Figure"), "/Pg": page, "/Alt": "Buried",
+            "/K": pikepdf_mod.Array([7]),
+        }.get
+        fig.objgen = (3, 0)
+
+        sect = MagicMock()
+        sect.get.side_effect = {
+            "/S": Name("/Sect"),
+            "/K": pikepdf_mod.Array([fig]),
+        }.get
+        sect.objgen = (4, 0)
+
+        struct_root = MagicMock()
+        struct_root.get.side_effect = {"/K": pikepdf_mod.Array([sect])}.get
+        struct_root.objgen = (1, 0)
+
+        pdf = MagicMock()
+        pdf.Root.get.side_effect = {"/StructTreeRoot": struct_root}.get
+        pdf.pages = [page]
+
+        result = _read_source_struct_elements(pdf)
+        self.assertEqual(len(result[0]), 1)
+        self.assertEqual(result[0][0].alt_text, "Buried")
+
 
 if __name__ == "__main__":
     unittest.main()
