@@ -652,3 +652,37 @@ def _match_occurrences_to_sources(
         )
 
     return results  # type: ignore[return-value]
+
+
+# ---------------------------------------------------------------------------
+# Visual reading-order sort
+# ---------------------------------------------------------------------------
+
+def _sort_visual_order(items: list) -> list:
+    """Sort ResolvedImages top-to-bottom, left-to-right (visual reading order).
+
+    PDF y-axis is bottom-up: higher y = higher on page.  Row-banding groups
+    items at similar y so a slight vertical drift within a visual row does
+    not break left-to-right ordering.
+    """
+    def y_center(it): return (it.bbox.y0 + it.bbox.y1) / 2
+    def x_center(it): return (it.bbox.x0 + it.bbox.x1) / 2
+    def height(it):   return max(1.0, it.bbox.y1 - it.bbox.y0)
+
+    by_y = sorted(items, key=lambda i: -y_center(i))
+    rows: list[list] = []
+    for it in by_y:
+        placed = False
+        for row in rows:
+            row_y = y_center(row[0])
+            tol = max(height(row[0]), height(it)) * 0.5
+            if abs(y_center(it) - row_y) <= tol:
+                row.append(it)
+                placed = True
+                break
+        if not placed:
+            rows.append([it])
+    output: list = []
+    for row in rows:
+        output.extend(sorted(row, key=x_center))
+    return output

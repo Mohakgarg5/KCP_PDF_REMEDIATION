@@ -572,5 +572,28 @@ class TestMatchingEngine(unittest.TestCase):
         self.assertEqual(results[0].alt_text, "")
 
 
+class TestVisualOrderSort(unittest.TestCase):
+    """Top-to-bottom, left-to-right page-visual order with row banding."""
+
+    def test_sort_2x2_grid(self):
+        from image_reconciliation import _sort_visual_order
+        top_left  = ResolvedImage("/Im0", BBox(50,  500, 250, 700))
+        top_right = ResolvedImage("/Im1", BBox(300, 500, 500, 700))
+        bot_left  = ResolvedImage("/Im2", BBox(50,  100, 250, 300))
+        bot_right = ResolvedImage("/Im3", BBox(300, 100, 500, 300))
+        sorted_items = _sort_visual_order([bot_right, top_left, bot_left, top_right])
+        self.assertEqual([i.xobject_name for i in sorted_items],
+                         ["/Im0", "/Im1", "/Im2", "/Im3"])
+
+    def test_sort_horizontal_row(self):
+        from image_reconciliation import _sort_visual_order
+        left  = ResolvedImage("/Im0", BBox(50,  500, 200, 600))
+        mid   = ResolvedImage("/Im1", BBox(220, 500, 380, 600))
+        right = ResolvedImage("/Im2", BBox(400, 500, 560, 600))
+        sorted_items = _sort_visual_order([right, left, mid])
+        self.assertEqual([i.xobject_name for i in sorted_items],
+                         ["/Im0", "/Im1", "/Im2"])
+
+
 if __name__ == "__main__":
     unittest.main()
