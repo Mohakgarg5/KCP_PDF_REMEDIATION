@@ -808,6 +808,13 @@ def _extract_images(pdf_path: str, pages: list):
                             "Could not render image '%s' on page %d: %s",
                             resolved.xobject_name, page_idx, e,
                         )
+                # Vector-figure placeholder: reconciliation emits Resolved with
+                # an empty xobject_name when a source /Figure has alt text but
+                # no matching Image Do (e.g. a chart drawn purely with path
+                # operators).  Carry it as a vector ImageBlock so the tagger
+                # can attach the alt to a Form XObject (or insert a synthetic
+                # Figure tag) instead of losing the alt entirely.
+                is_vector = not resolved.xobject_name
                 new_blocks.append(ImageBlock(
                     image_bytes=image_bytes,
                     format=fmt,
@@ -815,6 +822,7 @@ def _extract_images(pdf_path: str, pages: list):
                     page_number=page_idx,
                     alt_text=resolved.alt_text,
                     is_decorative=resolved.is_decorative,
+                    is_vector_figure=is_vector,
                 ))
 
             page_content.images = new_blocks

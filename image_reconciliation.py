@@ -225,18 +225,22 @@ def _mcr_mcid(node) -> Optional[int]:
         return None
 
 
-def _collect_leaf_mcids(node, visited: set) -> list[int]:
+def _collect_leaf_mcids(node, visited: set, _pinned: list | None = None) -> list[int]:
     """Walk node's /K subtree, return all MCID leaves.
 
     Handles both leaf encodings: direct (plain int in /K) and indirect
-    (MCR dict). Uses id(node) for cycle detection — pikepdf inline dicts
-    share objgen=(0,0), so objgen-based dedup conflates unrelated nodes.
+    (MCR dict). Uses _node_dedup_key for cycle detection, with optional
+    _pinned list to keep inline-dict references alive so id() stays stable.
     """
     mcids: list[int] = []
-    oid = id(node)
-    if oid in visited:
+    if _pinned is None:
+        _pinned = []
+    key = _node_dedup_key(node)
+    if key in visited:
         return mcids
-    visited.add(oid)
+    visited.add(key)
+    if key[0] == "id":
+        _pinned.append(node)
 
     try:
         kids = node.get("/K")
@@ -257,13 +261,13 @@ def _collect_leaf_mcids(node, visited: set) -> list[int]:
                 if mcr_id is not None:
                     mcids.append(mcr_id)
                 else:
-                    mcids.extend(_collect_leaf_mcids(child, visited))
+                    mcids.extend(_collect_leaf_mcids(child, visited, _pinned))
         return mcids
     if hasattr(kids, "get"):
         mcr_id = _mcr_mcid(kids)
         if mcr_id is not None:
             return [mcr_id]
-        return _collect_leaf_mcids(kids, visited)
+        return _collect_leaf_mcids(kids, visited, _pinned)
     return mcids
 
 
@@ -278,10 +282,67 @@ def _bbox_from_pdf_array(arr) -> Optional[BBox]:
         return None
 
 
+def _node_dedup_key(node):
+    """Return a stable dedup key for a pikepdf struct node.
+
+    Indirect objects get an ('og', objgen) key — stable across calls.
+    Inline dicts share objgen=(0,0) in pikepdf, so they fall back to
+    ('id', id(node)); callers must pin the node to prevent GC recycling
+    the address (which would cause id() collisions between unrelated
+    short-lived wrappers).
+    """
+    try:
+        og = node.objgen
+        if og != (0, 0):
+            return ("og", og)
+    except Exception:
+        pass
+    return ("id", id(node))
+
+
+def _find_descendant_pg(node, _depth: int = 0):
+    """Return the /Pg attribute from the first descendant that has one.
+
+    Word and InDesign typically attach /Pg to the MCR leaf, not the
+    Figure that contains it; this helper recovers the page reference by
+    walking down a few levels.  Capped at depth 6 to avoid pathological
+    cost on large subtrees.
+    """
+    if _depth > 6:
+        return None
+    try:
+        kids = node.get("/K")
+    except Exception:
+        return None
+    if kids is None:
+        return None
+    candidates = []
+    if isinstance(kids, list) or isinstance(kids, pikepdf.Array):
+        for child in kids:
+            if hasattr(child, "get"):
+                candidates.append(child)
+    elif hasattr(kids, "get"):
+        candidates.append(kids)
+    for child in candidates:
+        try:
+            pg = child.get("/Pg")
+            if pg is not None:
+                return pg
+        except Exception:
+            pass
+    for child in candidates:
+        deeper = _find_descendant_pg(child, _depth + 1)
+        if deeper is not None:
+            return deeper
+    return None
+
+
 def _read_source_struct_elements(pdf) -> dict[int, list[SourceStructElement]]:
     """Walk /StructTreeRoot, return {page_index: [SourceStructElement, ...]}.
 
-    Collects /Figure AND /Artifact nodes. Empty result when struct tree is absent.
+    Collects /Figure AND /Artifact nodes. The RoleMap is consulted to
+    resolve aliased tags (e.g. /Diagram -> /Figure on Word-generated PDFs).
+    Empty result when struct tree is absent.
     """
     result: dict[int, list[SourceStructElement]] = {}
     try:
@@ -299,29 +360,58 @@ def _read_source_struct_elements(pdf) -> dict[int, list[SourceStructElement]]:
                 "Could not build page-index lookup; struct elements may default to page 0"
             )
 
-        visited: set[int] = set()
+        # Resolve type aliases via /RoleMap. Word/Excel PDFs frequently
+        # tag illustrations as /Diagram or /InlineShape and rely on the
+        # RoleMap to declare /Diagram -> /Figure.
+        role_map_resolved: dict[str, str] = {}
+        try:
+            raw_role_map = struct_root.get("/RoleMap")
+            if raw_role_map is not None:
+                for src_tag, mapped_tag in raw_role_map.items():
+                    try:
+                        role_map_resolved[str(src_tag)] = str(mapped_tag)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+        visited: set = set()
+        # Hold strong refs to inline-keyed nodes so id() stays stable.
+        _pinned: list = []
         FIGURE = pikepdf.Name("/Figure")
         ARTIFACT = pikepdf.Name("/Artifact")
 
+        def _resolved_struct_type(raw_s):
+            if raw_s is None:
+                return None
+            s_str = str(raw_s)
+            # Single-hop role-map resolution (PDF/UA permits chains, but
+            # standard structure types map to themselves and chains are rare).
+            mapped = role_map_resolved.get(s_str, s_str)
+            return mapped
+
         def _walk(node, inherited_pg=None):
-            # Use id() rather than objgen — inline dicts share objgen=(0,0)
-            # in pikepdf, which would conflate unrelated nodes.
-            oid = id(node)
-            if oid in visited:
+            key = _node_dedup_key(node)
+            if key in visited:
                 return
-            visited.add(oid)
+            visited.add(key)
+            if key[0] == "id":
+                _pinned.append(node)
 
             try:
                 struct_type = node.get("/S")
             except Exception:
                 struct_type = None
+            resolved_type_str = _resolved_struct_type(struct_type)
             pg = None
             try:
                 pg = node.get("/Pg") or inherited_pg
             except Exception:
                 pg = inherited_pg
 
-            if struct_type == FIGURE or struct_type == ARTIFACT:
+            is_figure = (struct_type == FIGURE) or (resolved_type_str == "/Figure")
+            is_artifact = (struct_type == ARTIFACT) or (resolved_type_str == "/Artifact")
+            if is_figure or is_artifact:
                 # Resolve /Alt
                 raw_alt = None
                 try:
@@ -343,20 +433,30 @@ def _read_source_struct_elements(pdf) -> dict[int, list[SourceStructElement]]:
                 # MCIDs — fresh visited set so we walk every leaf even on shared dicts
                 mcids = _collect_leaf_mcids(node, set())
 
-                # Determine page
+                # Determine page. In Word/InDesign output /Pg typically
+                # lives on MCR leaf nodes below the Figure (not on the Figure
+                # itself), so when neither the figure nor an ancestor has /Pg
+                # we have to peek down at the descendants.
                 page_idx = None
                 if pg is not None:
                     try:
                         page_idx = page_id_to_idx.get(pg.objgen)
                     except Exception:
                         page_idx = None
+                if page_idx is None:
+                    leaf_pg = _find_descendant_pg(node)
+                    if leaf_pg is not None:
+                        try:
+                            page_idx = page_id_to_idx.get(leaf_pg.objgen)
+                        except Exception:
+                            page_idx = None
                 if page_idx is None and mcids:
-                    # Fallback: use first page (rare)
+                    # Fallback: use first page (rare; only when /Pg lookup failed)
                     page_idx = 0
 
                 if page_idx is not None:
                     elem = SourceStructElement(
-                        struct_type=("/Artifact" if struct_type == ARTIFACT else "/Figure"),
+                        struct_type=("/Artifact" if is_artifact else "/Figure"),
                         alt_text=alt_str,
                         page_index=page_idx,
                         mcids=mcids,
@@ -731,15 +831,38 @@ def reconcile_page_images(pdf_path: str) -> dict[int, list]:
 
                 wm_names = detect_watermark_forms(page)
                 occurrences = _parse_image_occurrences(page, wm_names)
-                if not occurrences:
-                    continue
-
                 sources = list(source_by_page.get(page_idx, []))
-                _derive_source_bboxes(sources, occurrences)
-                resolved = _match_occurrences_to_sources(
-                    occurrences, sources, page_height
-                )
-                result[page_idx] = _sort_visual_order(resolved)
+
+                if occurrences:
+                    _derive_source_bboxes(sources, occurrences)
+                    resolved = _match_occurrences_to_sources(
+                        occurrences, sources, page_height
+                    )
+                else:
+                    resolved = []
+
+                # Vector-figure preservation: any source /Figure with a non-empty
+                # /Alt that didn't get attached to an occurrence above is emitted
+                # as a placeholder ResolvedImage (empty xobject_name).  This keeps
+                # alt text for chart-like figures rendered entirely with path
+                # operators (no Image Do) flowing through to the tagger.
+                claimed_alts = {r.alt_text for r in resolved if r.alt_text}
+                for src in sources:
+                    if src.struct_type != "/Figure":
+                        continue
+                    if not src.alt_text:
+                        continue
+                    if src.alt_text in claimed_alts:
+                        continue
+                    resolved.append(ResolvedImage(
+                        xobject_name="",
+                        bbox=src.bbox or BBox(x0=0, y0=0, x1=0, y1=0),
+                        alt_text=src.alt_text,
+                        is_decorative=False,
+                    ))
+
+                if resolved:
+                    result[page_idx] = _sort_visual_order(resolved)
             except Exception as e:
                 logger.debug("Reconciliation failed on page %d: %s", page_idx, e)
                 continue
