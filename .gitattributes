@@ -1,0 +1,8 @@
+# Treat PDFs as binary — disables EOL normalization and textual diffs.
+*.pdf binary
+
+# Office documents are binary too.
+*.docx binary
+*.xlsx binary
+*.pptx binary
+*.dotx binary
