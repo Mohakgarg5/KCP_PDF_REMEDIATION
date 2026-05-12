@@ -49,7 +49,8 @@ def extract_document(pdf_path: str) -> DocumentContent:
     for page in raw_pages:
         page.text_blocks = _merge_split_blocks(page.text_blocks)
 
-    # Phase 3: Extract images via pikepdf
+    # Phase 3: Extract images via pikepdf (alt text + decorative status
+    # are resolved inside _extract_images via image_reconciliation).
     _extract_images(pdf_path, raw_pages)
 
     # Phase 4: Detect the body font size (most common size)
@@ -585,7 +586,10 @@ def _classify_elements(page: PageContent, body_font_size: float, hf_signatures: 
                 normalized = "__page_number__"
             normalized = normalized.replace("\n", " ").strip()
 
-            if (normalized, zone) in hf_signatures:
+            # Only artifact repeating headers/footers from page 2 onwards.
+            # On the first page they are genuine document metadata (case #,
+            # byline, date) and must remain readable by screen readers.
+            if page.page_number > 0 and (normalized, zone) in hf_signatures:
                 tb.element_type = ElementType.HEADER_FOOTER
                 continue
             # Also catch small-font text in footer zone (copyright notices etc.)
@@ -682,8 +686,7 @@ def _detect_tables(page: PageContent, body_font_size: float = 12.0):
     for y in sorted_ys:
         row_blocks = sorted(multi_col_rows[y], key=lambda b: b.bbox.x0)
         if len(row_blocks) >= col_count - 1:
-            row_texts = [b.text for b in row_blocks]
-            table_rows.append(row_texts)
+            table_rows.append(list(row_blocks))  # keep TextBlock objects (bbox needed for tagging)
             table_blocks.extend(row_blocks)
 
     if len(table_rows) >= 2:
@@ -716,72 +719,115 @@ def _detect_tables(page: PageContent, body_font_size: float = 12.0):
 
 
 def _extract_images(pdf_path: str, pages: list):
-    """Extract images from PDF using pikepdf."""
+    """Extract images and reconcile their alt text + decorative status.
+
+    Delegates classification (alt text, decorative, watermark) to
+    image_reconciliation.reconcile_page_images, which uses source-tree intent
+    + position-based matching.  Image bytes are then rendered per Resolved
+    occurrence so each ImageBlock carries: image_bytes, page bbox, alt_text,
+    is_decorative.
+    """
+    from image_reconciliation import reconcile_page_images
+
     try:
         pdf = pikepdf.Pdf.open(pdf_path)
     except Exception as e:
         logger.warning("Could not open PDF for image extraction: %s", e)
         return
 
-    for page_idx, pdf_page in enumerate(pdf.pages):
-        if page_idx >= len(pages):
-            break
+    resolved_by_page = reconcile_page_images(pdf_path)
 
-        page_content = pages[page_idx]
-        img_index = 0
-
+    def _collect_image_xobjects(resources, lookup, seen):
+        """Recursive: gather every Image XObject reachable from `resources`."""
+        if resources is None:
+            return
         try:
-            # Check page Resources and inherited Resources
-            resources = pdf_page.get("/Resources")
-            if resources is None:
-                parent = pdf_page.get("/Parent")
-                while parent and resources is None:
-                    resources = parent.get("/Resources")
-                    parent = parent.get("/Parent")
-            if resources is None:
-                continue
             xobjects = resources.get("/XObject")
-            if xobjects is None:
-                continue
-        except Exception as e:
-            logger.warning("Could not read resources on page %d: %s", page_idx, e)
-            continue
-
-        for name, obj in xobjects.items():
+        except Exception:
+            return
+        if xobjects is None:
+            return
+        for n, o in xobjects.items():
             try:
-                if not hasattr(obj, "keys"):
+                ogen = getattr(o, "objgen", None)
+                if ogen and ogen in seen:
                     continue
-                if obj.get("/Subtype") != pikepdf.Name.Image:
-                    continue
-
-                pdfimage = pikepdf.PdfImage(obj)
-                pil_image = pdfimage.as_pil_image()
-                buf = BytesIO()
-                img_format = "PNG"
-                pil_image.save(buf, format=img_format)
-
-                image_block = ImageBlock(
-                    image_bytes=buf.getvalue(),
-                    format=img_format.lower(),
-                    bbox=BBox(0, 0, pdfimage.width, pdfimage.height),
-                    page_number=page_idx,
-                    alt_text=f"Figure {img_index + 1} on page {page_idx + 1}",
-                    is_decorative=False,
-                )
-
-                if img_index < len(page_content.images):
-                    image_block.bbox = page_content.images[img_index].bbox
-                    page_content.images[img_index] = image_block
-                else:
-                    page_content.images.append(image_block)
-
-                img_index += 1
-            except Exception as e:
-                logger.debug("Could not extract image '%s' on page %d: %s",
-                             name, page_idx, e)
+                if ogen:
+                    seen.add(ogen)
+                sub = o.get("/Subtype")
+                if sub == pikepdf.Name("/Image"):
+                    lookup.setdefault(str(n), o)
+                elif sub == pikepdf.Name("/Form"):
+                    inner = o.get("/Resources")
+                    if inner is not None:
+                        _collect_image_xobjects(inner, lookup, seen)
+            except Exception:
                 continue
 
-    pdf.close()
+    try:
+        for page_idx, pdf_page in enumerate(pdf.pages):
+            if page_idx >= len(pages):
+                break
+            page_content = pages[page_idx]
+
+            page_resolved = resolved_by_page.get(page_idx)
+            if page_resolved is None:
+                # Reconciliation skipped this page (failure or empty);
+                # leave page_content.images as pdfminer populated it.
+                continue
+
+            # Look up rendered image bytes by xobject name on this page,
+            # descending into Form XObjects to reach nested Image data.
+            xobj_lookup: dict = {}
+            try:
+                resources = pdf_page.get("/Resources")
+                if resources is None:
+                    parent = pdf_page.get("/Parent")
+                    while parent is not None and resources is None:
+                        resources = parent.get("/Resources")
+                        parent = parent.get("/Parent")
+                _collect_image_xobjects(resources, xobj_lookup, set())
+            except Exception:
+                pass
+
+            new_blocks: list = []
+            for resolved in page_resolved:
+                img_obj = xobj_lookup.get(resolved.xobject_name)
+                image_bytes = b""
+                fmt = ""
+                if img_obj is not None:
+                    try:
+                        pdfimage = pikepdf.PdfImage(img_obj)
+                        pil_image = pdfimage.as_pil_image()
+                        buf = BytesIO()
+                        pil_image.save(buf, format="PNG")
+                        image_bytes = buf.getvalue()
+                        fmt = "png"
+                    except Exception as e:
+                        logger.debug(
+                            "Could not render image '%s' on page %d: %s",
+                            resolved.xobject_name, page_idx, e,
+                        )
+                # Vector-figure placeholder: reconciliation emits Resolved with
+                # an empty xobject_name when a source /Figure has alt text but
+                # no matching Image Do (e.g. a chart drawn purely with path
+                # operators).  Carry it as a vector ImageBlock so the tagger
+                # can attach the alt to a Form XObject (or insert a synthetic
+                # Figure tag) instead of losing the alt entirely.
+                is_vector = not resolved.xobject_name
+                new_blocks.append(ImageBlock(
+                    image_bytes=image_bytes,
+                    format=fmt,
+                    bbox=resolved.bbox,
+                    page_number=page_idx,
+                    alt_text=resolved.alt_text,
+                    is_decorative=resolved.is_decorative,
+                    is_vector_figure=is_vector,
+                ))
+
+            page_content.images = new_blocks
+    finally:
+        pdf.close()
 
 
 def _extract_filled_rects(pdf_path: str, page_count: int) -> list:

@@ -138,7 +138,7 @@ def _tag_page(pdf, page, page_content: Optional[PageContent],
     link_annots = _collect_link_annots(page)
 
     new_ops, struct_elems = _insert_markers(
-        ops, blocks, page, watermark_forms, mcid_counter, link_annots
+        ops, blocks, page, watermark_forms, mcid_counter, link_annots, pdf=pdf
     )
 
     new_stream_data = pikepdf.unparse_content_stream(new_ops)
@@ -197,10 +197,25 @@ def _build_block_index(page_content: Optional[PageContent]) -> list:
         blocks.append({
             "bbox": img.bbox,
             "struct_type": "/Figure",
-            "alt_text": img.alt_text or "Image",
+            "alt_text": img.alt_text or "Figure",
             "is_artifact": img.is_decorative,
+            "is_vector": getattr(img, "is_vector_figure", False),
             "used": False,
         })
+
+    for table in page_content.tables:
+        table_id = id(table)  # globally unique across all pages
+        for row_idx, row in enumerate(table.rows):
+            is_header = row_idx < table.header_rows
+            for cell in row:
+                blocks.append({
+                    "bbox": cell.bbox,
+                    "struct_type": "/TH" if is_header else "/TD",
+                    "text": cell.text,
+                    "is_artifact": False,
+                    "row_idx": row_idx,
+                    "table_idx": table_id,
+                })
 
     return blocks
 
@@ -302,13 +317,45 @@ def _find_link_annot(x: float, y: float, link_annots: list) -> Optional[int]:
     return best_idx
 
 
+def _clean_form_xobject_markers(pdf: pikepdf.Pdf, page, xobj_name: str):
+    """Strip all BDC/BMC/EMC markers from a Form XObject's content stream.
+
+    When a Form XObject is wrapped as a <Figure> in the page stream, any
+    Artifact or MCID markers inside the Form create PDF/UA Clause 7.1
+    violations (Artifact inside tagged content, or tagged content inside
+    Artifact).  Stripping them makes the Form's content "clean" so the
+    outer Figure tag is the sole structure context.
+    """
+    try:
+        xobjects = _get_xobjects(page)
+        if xobjects is None:
+            return
+        obj = xobjects.get(xobj_name) or xobjects.get(xobj_name.lstrip("/"))
+        if obj is None or not hasattr(obj, "get"):
+            return
+        if obj.get("/Subtype") != pikepdf.Name.Form:
+            return
+        try:
+            ops = list(pikepdf.parse_content_stream(obj))
+        except Exception:
+            return
+        stripped = _strip_markers(ops)
+        if len(stripped) == len(ops):
+            return  # nothing changed — avoid unnecessary stream rewrite
+        new_data = pikepdf.unparse_content_stream(stripped)
+        obj.write(new_data)
+    except Exception as e:
+        logger.debug("Could not clean Form XObject '%s' markers: %s", xobj_name, e)
+
+
 def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
-                    link_annots=None):
+                    link_annots=None, pdf=None):
     """Walk through content stream ops, inserting BDC/EMC structure markers.
 
     Uses an "artifact-as-default" strategy so nothing is ever untagged.
     When link_annots is provided, text falling within a link annotation's
     rect is tagged as /Link with both MCR and annotation reference.
+    pdf is required for cleaning Form XObject content streams.
     """
     if link_annots is None:
         link_annots = []
@@ -364,6 +411,11 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
         if struct_open:
             new_ops.append(([], pikepdf.Operator("EMC")))
             struct_open = False
+            # Mark table cell blocks as used when closed so duplicate TD/TH
+            # elements are not created for multi-line cell content.
+            if (current_block_idx >= 0
+                    and blocks[current_block_idx]["struct_type"] in ("/TD", "/TH")):
+                blocks[current_block_idx]["used"] = True
             current_block_idx = -1
             current_link_idx = -1
 
@@ -395,9 +447,51 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
             ))
             struct_open = True
             current_block_idx = bidx
-            struct_elems.append((
-                mcid, block["struct_type"], block.get("alt_text", ""),
-            ))
+            row_idx = block.get("row_idx")
+            if row_idx is not None:
+                # Record the first MCID so continuations can reference it
+                if "first_mcid" not in block:
+                    block["first_mcid"] = mcid
+                struct_elems.append((
+                    mcid, block["struct_type"], "", None, None,
+                    row_idx, block.get("table_idx", 0),
+                ))
+            else:
+                struct_elems.append((
+                    mcid, block["struct_type"], block.get("alt_text", ""),
+                ))
+
+    def _open_struct_for_cell_cont(cidx):
+        """Open a continuation BDC for a cell that was already emitted once.
+
+        Creates a new MCID tagged with an 8-tuple so _build_structure_tree
+        can attach the MCR to the *existing* TD/TH struct element instead of
+        creating a duplicate, keeping cell content structurally unified.
+        """
+        nonlocal struct_open, current_block_idx
+
+        if struct_open and current_block_idx == cidx:
+            return  # same cell already open in this BT block
+
+        _close_struct()
+        _close_artifact()
+
+        block = blocks[cidx]
+        mcid = mcid_counter[0]
+        mcid_counter[0] += 1
+        new_ops.append((
+            [pikepdf.Name(block["struct_type"]),
+             pikepdf.Dictionary({"/MCID": mcid})],
+            pikepdf.Operator("BDC"),
+        ))
+        struct_open = True
+        current_block_idx = cidx
+        # 8-tuple: index 7 holds the original MCID to merge this MCR into
+        struct_elems.append((
+            mcid, "/TD_CONT", "", None, None,
+            block.get("row_idx"), block.get("table_idx", 0),
+            block.get("first_mcid"),
+        ))
 
     def _open_struct_for_link(lidx):
         nonlocal struct_open, current_block_idx, current_link_idx
@@ -540,11 +634,22 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
                 if lidx is not None:
                     _open_struct_for_link(lidx)
                 else:
-                    bidx = _find_block(ux, uy, blocks)
-                    if bidx >= 0:
-                        _open_struct_for_block(bidx)
+                    # Try table cell match (tight tolerance) before general block match
+                    cidx = _find_cell_block(ux, uy, blocks)
+                    if cidx >= 0:
+                        _open_struct_for_block(cidx)
                     else:
-                        _open_struct_unmatched()
+                        # Check if this is a continuation of an already-emitted cell
+                        # (e.g. second BT block in a multi-format cell)
+                        cont_idx = _find_cell_continuation(ux, uy, blocks)
+                        if cont_idx >= 0:
+                            _open_struct_for_cell_cont(cont_idx)
+                        else:
+                            bidx = _find_block(ux, uy, blocks)
+                            if bidx >= 0:
+                                _open_struct_for_block(bidx)
+                            else:
+                                _open_struct_unmatched()
 
             new_ops.append((operands, operator))
             continue
@@ -605,6 +710,44 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
                     _open_artifact()
                     continue
 
+            if xobj_type == "Form":
+                # If a vector figure placeholder exists for this page, tag this
+                # Form XObject as a Figure (vector chart/diagram from InDesign).
+                vec_idx = _find_vector_figure_block(blocks)
+                # Strip any Artifact/BDC/EMC markers from the Form's own content
+                # stream before wrapping it as Figure.  Internal markers inside a
+                # Figure-wrapped Form violate PDF/UA Clause 7.1 (Artifact inside
+                # tagged content, and vice-versa).
+                if pdf is not None:
+                    _clean_form_xobject_markers(pdf, page, xobj_name)
+                _close_struct()
+                _close_artifact()
+                mcid = mcid_counter[0]
+                mcid_counter[0] += 1
+                new_ops.append((
+                    [pikepdf.Name("/Figure"),
+                     pikepdf.Dictionary({"/MCID": mcid})],
+                    pikepdf.Operator("BDC"),
+                ))
+                new_ops.append((operands, operator))
+                new_ops.append(([], pikepdf.Operator("EMC")))
+                if vec_idx is not None:
+                    blocks[vec_idx]["used"] = True
+                    alt = blocks[vec_idx].get("alt_text", "Figure")
+                else:
+                    # No alt-text placeholder — still wrap the whole Form XObject
+                    # as a single Figure so its constituent paths are never exposed
+                    # as individual tagged elements (reviewer request: don't break
+                    # figures into their constituent components).
+                    alt = "Figure"
+                # Compute bbox from the Form XObject's /BBox and the
+                # current CTM so the Figure struct element satisfies
+                # PDF/UA bounding-box requirements.
+                form_bbox = _compute_form_bbox(page, xobj_name, ctm)
+                struct_elems.append((mcid, "/Figure", alt, form_bbox))
+                _open_artifact()
+                continue
+
             # Any other Do → stays in artifact wrapper
             if not artifact_open:
                 _close_struct()
@@ -636,8 +779,8 @@ def _find_block(x: float, y: float, blocks: list) -> int:
     best_dist = float("inf")
 
     for idx, block in enumerate(blocks):
-        if block["struct_type"] == "/Figure":
-            continue
+        if block["struct_type"] in ("/Figure", "/TD", "/TH"):
+            continue  # Figures and table cells use dedicated matchers
         bbox = block["bbox"]
         # Adaptive tolerance: 20pt or 30% of block height, whichever is larger
         bh = max(bbox.y1 - bbox.y0, 1.0)
@@ -647,6 +790,67 @@ def _find_block(x: float, y: float, blocks: list) -> int:
 
         if (bbox.x0 - tol_x <= x <= bbox.x1 + tol_x and
                 bbox.y0 - tol_y <= y <= bbox.y1 + tol_y):
+            cx = (bbox.x0 + bbox.x1) / 2
+            cy = (bbox.y0 + bbox.y1) / 2
+            dist = abs(x - cx) + abs(y - cy)
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = idx
+
+    return best_idx
+
+
+def _find_cell_block(x: float, y: float, blocks: list) -> int:
+    """Find the table cell (TD/TH) whose bbox strictly contains position (x, y).
+
+    Uses a tight tolerance (4pt) so only text that is genuinely inside the
+    cell bbox gets matched.  Already-used cells are still matched so that all
+    operators inside one cell stay inside the same open struct (no re-open).
+    Returns -1 if nothing matches.
+    """
+    TOL = 4.0
+    best_idx = -1
+    best_dist = float("inf")
+
+    for idx, block in enumerate(blocks):
+        if block["struct_type"] not in ("/TD", "/TH"):
+            continue
+        if block.get("used"):
+            continue  # cell already fully emitted — don't re-open
+        bbox = block["bbox"]
+        if (bbox.x0 - TOL <= x <= bbox.x1 + TOL and
+                bbox.y0 - TOL <= y <= bbox.y1 + TOL):
+            cx = (bbox.x0 + bbox.x1) / 2
+            cy = (bbox.y0 + bbox.y1) / 2
+            dist = abs(x - cx) + abs(y - cy)
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = idx
+
+    return best_idx
+
+
+def _find_cell_continuation(x: float, y: float, blocks: list) -> int:
+    """Find a *used* TD/TH cell whose bbox contains (x, y).
+
+    Called only after _find_cell_block returns -1 (no unused cell matches).
+    When a cell spans multiple BT blocks (mixed formatting), subsequent blocks
+    hit this function and get merged into the same struct element via the
+    /TD_CONT mechanism in _build_structure_tree.
+    Returns -1 if no used cell matches.
+    """
+    TOL = 4.0
+    best_idx = -1
+    best_dist = float("inf")
+
+    for idx, block in enumerate(blocks):
+        if block["struct_type"] not in ("/TD", "/TH"):
+            continue
+        if not block.get("used"):
+            continue  # only match already-used cells
+        bbox = block["bbox"]
+        if (bbox.x0 - TOL <= x <= bbox.x1 + TOL and
+                bbox.y0 - TOL <= y <= bbox.y1 + TOL):
             cx = (bbox.x0 + bbox.x1) / 2
             cy = (bbox.y0 + bbox.y1) / 2
             dist = abs(x - cx) + abs(y - cy)
@@ -668,6 +872,8 @@ def _find_image_block_by_position(blocks: list, x: float, y: float) -> Optional[
     for idx, block in enumerate(blocks):
         if block["struct_type"] != "/Figure" or block.get("used"):
             continue
+        if block.get("is_vector"):
+            continue  # vector figures are matched by Form XObject, not position
         bbox = block["bbox"]
         # Use generous tolerance since CTM position may not perfectly align
         tol = max(50.0, max(bbox.width, bbox.height) * 0.5)
@@ -681,101 +887,77 @@ def _find_image_block_by_position(blocks: list, x: float, y: float) -> Optional[
     # Fallback: next unused image block if position matching fails
     if best_idx is None:
         for idx, block in enumerate(blocks):
-            if block["struct_type"] == "/Figure" and not block.get("used"):
+            if (block["struct_type"] == "/Figure"
+                    and not block.get("used")
+                    and not block.get("is_vector")):
                 best_idx = idx
                 break
 
     return best_idx
 
 
+def _find_vector_figure_block(blocks: list) -> Optional[int]:
+    """Find the first unmatched vector figure block (placeholder from original structure tree)."""
+    for idx, block in enumerate(blocks):
+        if (block["struct_type"] == "/Figure"
+                and block.get("is_vector")
+                and not block.get("used")):
+            return idx
+    return None
+
+
 # ---------------------------------------------------------------------------
-# Watermark detection
+# Watermark detection — moved to image_reconciliation.py so the extractor and
+# tagger share one implementation.  Local alias preserves the private name
+# already used inside this module.
 # ---------------------------------------------------------------------------
 
-_WATERMARK_KEYWORDS = [
-    # English
-    "draft", "confidential", "copy", "do not",
-    "sample", "watermark", "instructor", "reproduce",
-    "preliminary", "internal", "restricted", "void",
-    "duplicate", "unofficial", "not for distribution",
-    "review", "not for publication", "internal use",
-    "proprietary", "for review", "proof",
-    # French
-    "brouillon", "confidentiel", "copie", "ne pas",
-    "projet", "filigrane",
-    # German
-    "entwurf", "vertraulich", "kopie", "muster",
-    "wasserzeichen",
-    # Spanish
-    "borrador", "confidencial", "copia", "muestra",
-]
-
-
-def _detect_watermark_forms(page) -> set:
-    """Return set of XObject names that are watermark Form XObjects."""
-    wm_names = set()
-    xobjects = _get_xobjects(page)
-    if not xobjects:
-        return wm_names
-
-    for name, obj in xobjects.items():
-        try:
-            if not hasattr(obj, "keys"):
-                continue
-            if obj.get("/Subtype") != pikepdf.Name.Form:
-                continue
-
-            # Check for Adobe watermark marker
-            piece_info = obj.get("/PieceInfo")
-            if piece_info:
-                compound = piece_info.get("/ADBE_CompoundType")
-                if compound:
-                    private = compound.get("/Private")
-                    if private and str(private) == "/Watermark":
-                        wm_names.add(str(name))
-                        continue
-
-            # Check for Optional Content group named "Watermark"
-            oc = obj.get("/OC")
-            if oc:
-                oc_name = ""
-                try:
-                    if "/Name" in oc:
-                        oc_name = str(oc["/Name"])
-                    elif "/OCGs" in oc:
-                        for ocg in oc["/OCGs"]:
-                            if "/Name" in ocg:
-                                oc_name = str(ocg["/Name"])
-                                break
-                except Exception:
-                    pass
-                if "watermark" in oc_name.lower():
-                    wm_names.add(str(name))
-                    continue
-
-            # Check content for watermark keywords
-            try:
-                data = obj.read_bytes().decode("latin-1", errors="replace")
-            except Exception:
-                continue
-            # Only check if stream is small (avoid processing huge Form XObjects)
-            if len(data) > 10000:
-                continue
-            tj_texts = re.findall(r"\((.*?)\)", data)
-            full_text = " ".join(tj_texts).strip().lower()
-
-            if any(kw in full_text for kw in _WATERMARK_KEYWORDS):
-                wm_names.add(str(name))
-        except Exception as e:
-            logger.debug("Watermark detection failed for XObject '%s': %s", name, e)
-            continue
-
-    return wm_names
+from image_reconciliation import detect_watermark_forms as _detect_watermark_forms
 
 
 # ---------------------------------------------------------------------------
 # XObject helpers
 # ---------------------------------------------------------------------------
+
+def _compute_form_bbox(page, xobj_name: str, ctm: list) -> Optional[list]:
+    """Compute page-space bounding box for a Form XObject.
+
+    Reads the Form's /BBox (and optional /Matrix), composes with the
+    current CTM, and transforms all four corners to page coordinates.
+    Returns [x0, y0, x1, y1] or None if the bbox cannot be determined.
+    """
+    xobjects = _get_xobjects(page)
+    if not xobjects:
+        return None
+    obj = xobjects.get(xobj_name) or xobjects.get(xobj_name.lstrip("/"))
+    if obj is None:
+        return None
+    try:
+        raw_bbox = obj.get("/BBox")
+        if raw_bbox is None:
+            return None
+        fb = [float(raw_bbox[i]) for i in range(4)]
+        # Compose Form's own /Matrix (if any) with the current CTM
+        form_matrix = [1, 0, 0, 1, 0, 0]
+        raw_matrix = obj.get("/Matrix")
+        if raw_matrix is not None:
+            form_matrix = [float(raw_matrix[i]) for i in range(6)]
+        composed = _mat_mul(form_matrix, ctm)
+        # Transform all 4 corners of the Form's BBox to page space
+        corners = [
+            (fb[0], fb[1]), (fb[2], fb[1]),
+            (fb[2], fb[3]), (fb[0], fb[3]),
+        ]
+        xs, ys = [], []
+        for cx, cy in corners:
+            px = composed[0] * cx + composed[2] * cy + composed[4]
+            py = composed[1] * cx + composed[3] * cy + composed[5]
+            xs.append(px)
+            ys.append(py)
+        return [min(xs), min(ys), max(xs), max(ys)]
+    except Exception:
+        return None
+
 
 def _get_xobject_subtype(page, xobj_name: str) -> str:
     """Return 'Image', 'Form', or '' for the named XObject.
@@ -836,12 +1018,27 @@ def _build_structure_tree(pdf: pikepdf.Pdf, all_page_elems: list,
     def _remap_struct_type(page_idx: int, elem_idx: int, st: str) -> str:
         return _elem_overrides.get((page_idx, elem_idx), st)
 
+    # Build Document → Art hierarchy to match InDesign's exported structure.
+    # InDesign automatically wraps all body content in an <Art> element; our
+    # flat Document → P... output was missing this container.
+    outer_doc_kids = pikepdf.Array()
+    outer_doc_elem = pdf.make_indirect(pikepdf.Dictionary({
+        "/Type": pikepdf.Name("/StructElem"),
+        "/S": pikepdf.Name("/Document"),
+        "/K": outer_doc_kids,
+    }))
+
+    # <Art> sits directly under <Document>; all content elements go under <Art>.
+    # The local names doc_elem / doc_kids are kept so the rest of the function
+    # (grouping helpers, ParentTree wiring) continues to work unchanged.
     doc_kids = pikepdf.Array()
     doc_elem = pdf.make_indirect(pikepdf.Dictionary({
         "/Type": pikepdf.Name("/StructElem"),
-        "/S": pikepdf.Name("/Document"),
+        "/S": pikepdf.Name("/Art"),
+        "/P": outer_doc_elem,
         "/K": doc_kids,
     }))
+    outer_doc_kids.append(doc_elem)
 
     parent_tree_nums = pikepdf.Array()
     all_leaf_elems = []  # (elem_ref, struct_type) for grouping
@@ -856,15 +1053,29 @@ def _build_structure_tree(pdf: pikepdf.Pdf, all_page_elems: list,
 
         page_ref = pdf.pages[page_idx].obj
         page_elem_refs = []
+        mcid_to_elem = {}     # mcid -> struct elem, for continuation lookup
+        pending_conts = []    # (cont_mcid, original_mcid) processed after main pass
 
         for elem_idx, elem_data in enumerate(struct_elems):
             # Tuples: (mcid, type, alt) or (mcid, type, alt, bbox)
             #     or: (mcid, "/Link", alt, None, annot_obj)
+            #     or: (mcid, "/TD"|"/TH", "", None, None, row_idx, table_idx)
+            #     or: (mcid, "/TD_CONT", "", None, None, row_idx, table_idx, orig_mcid)
             mcid = elem_data[0]
             struct_type = _remap_struct_type(page_idx, elem_idx, elem_data[1])
+
+            if struct_type == "/TD_CONT":
+                # Continuation of an already-created TD/TH — defer to second pass
+                original_mcid = elem_data[7] if len(elem_data) > 7 else None
+                pending_conts.append((mcid, original_mcid))
+                page_elem_refs.append(None)  # placeholder; filled in second pass
+                continue
+
             alt_text = elem_data[2]
             fig_bbox = elem_data[3] if len(elem_data) > 3 else None
             annot_obj = elem_data[4] if len(elem_data) > 4 else None
+            row_idx   = elem_data[5] if len(elem_data) > 5 else None
+            table_idx = elem_data[6] if len(elem_data) > 6 else None
 
             mcr = pikepdf.Dictionary({
                 "/Type": pikepdf.Name("/MCR"),
@@ -891,6 +1102,13 @@ def _build_structure_tree(pdf: pikepdf.Pdf, all_page_elems: list,
             if struct_type == "/Figure" and alt_text:
                 elem_dict["/Alt"] = pikepdf.String(alt_text)
 
+            # PDF/UA clause 7.5: TH elements must have a /Scope attribute
+            if struct_type == "/TH":
+                elem_dict["/A"] = pikepdf.Dictionary({
+                    "/O": pikepdf.Name("/Table"),
+                    "/Scope": pikepdf.Name("/Column"),
+                })
+
             if struct_type == "/Figure" and fig_bbox:
                 elem_dict["/A"] = pikepdf.Dictionary({
                     "/O": pikepdf.Name("/Layout"),
@@ -902,11 +1120,47 @@ def _build_structure_tree(pdf: pikepdf.Pdf, all_page_elems: list,
                 })
 
             elem = pdf.make_indirect(pikepdf.Dictionary(elem_dict))
+            mcid_to_elem[mcid] = elem
             page_elem_refs.append(elem)
-            all_leaf_elems.append((elem, struct_type))
+            all_leaf_elems.append((elem, struct_type, row_idx, table_idx))
 
             if struct_type == "/Link" and annot_obj is not None:
                 annot_parent_entries.append((annot_obj, elem))
+
+        # Second pass: attach continuation MCRs to their original TD/TH elements.
+        # The ParentTree maps each continuation MCID to the *same* struct element
+        # as the original, so the cell content stays unified under one /TD or /TH.
+        for cont_mcid, original_mcid in pending_conts:
+            original_elem = mcid_to_elem.get(original_mcid)
+            if original_elem is not None:
+                cont_mcr = pikepdf.Dictionary({
+                    "/Type": pikepdf.Name("/MCR"),
+                    "/Pg": page_ref,
+                    "/MCID": cont_mcid,
+                })
+                existing_k = original_elem.get("/K")
+                if isinstance(existing_k, pikepdf.Array):
+                    existing_k.append(cont_mcr)
+                else:
+                    original_elem[pikepdf.Name("/K")] = pikepdf.Array(
+                        [existing_k, cont_mcr]
+                    )
+                page_elem_refs[cont_mcid] = original_elem
+            else:
+                # Fallback: original not found — create a standalone TD so this
+                # MCID is never orphaned (avoids veraPDF clause 7.1/3 failure).
+                fallback_mcr = pikepdf.Dictionary({
+                    "/Type": pikepdf.Name("/MCR"),
+                    "/Pg": page_ref,
+                    "/MCID": cont_mcid,
+                })
+                fallback_elem = pdf.make_indirect(pikepdf.Dictionary({
+                    "/Type": pikepdf.Name("/StructElem"),
+                    "/S": pikepdf.Name("/TD"),
+                    "/K": fallback_mcr,
+                }))
+                page_elem_refs[cont_mcid] = fallback_elem
+                all_leaf_elems.append((fallback_elem, "/TD", None, None))
 
         parent_tree_nums.append(page_idx)
         parent_tree_nums.append(pikepdf.Array(page_elem_refs))
@@ -938,12 +1192,12 @@ def _build_structure_tree(pdf: pikepdf.Pdf, all_page_elems: list,
 
     struct_tree_root = pdf.make_indirect(pikepdf.Dictionary({
         "/Type": pikepdf.Name("/StructTreeRoot"),
-        "/K": doc_elem,
+        "/K": outer_doc_elem,
         "/ParentTree": parent_tree,
         "/ParentTreeNextKey": next_key,
     }))
 
-    doc_elem["/P"] = struct_tree_root
+    outer_doc_elem["/P"] = struct_tree_root
     pdf.Root[pikepdf.Name.StructTreeRoot] = struct_tree_root
 
 
@@ -978,8 +1232,37 @@ def _group_and_add_children(pdf: pikepdf.Pdf, doc_elem, doc_kids,
             l_kids.append(item_elem)
         doc_kids.append(l_elem)
 
-    def _flush_table(cells):
-        """Wrap accumulated /TD|/TH elements in /Table -> /TR."""
+    def _flush_table(cell_pairs):
+        """Wrap accumulated (elem, row_idx) pairs in /Table -> /TR... structure.
+
+        Normalises all rows to the median column count so veraPDF clause 7.2/42
+        (equal column spans) passes.  Rows that are longer are truncated; rows
+        that are shorter are padded with content-free /TD placeholders.
+        """
+        # --- Group cells by row first so we can normalise column counts ---
+        rows_ordered: list = []       # list of (row_idx, [cell_elem, ...])
+        row_map: dict = {}            # row_idx -> cell list
+        for cell_elem, row_idx in cell_pairs:
+            ridx = row_idx if row_idx is not None else 0
+            if ridx not in row_map:
+                row_map[ridx] = []
+                rows_ordered.append((ridx, row_map[ridx]))
+            row_map[ridx].append(cell_elem)
+
+        if not rows_ordered:
+            return
+
+        # Determine target column count: maximum across all rows.
+        # All rows are padded to this count with empty TD placeholders so that
+        # (a) every MCID-tagged cell stays in the tree (no orphaned MCIDs →
+        #     veraPDF clause 7.1/3) and (b) every row has the same column count
+        #     (veraPDF clause 7.2/42).  We never truncate — truncation would
+        #     drop struct elements from the tree while their MCIDs remain in
+        #     the content stream, causing "content not tagged" failures.
+        counts = [len(cells) for _, cells in rows_ordered]
+        target_cols = max(counts) if counts else 1
+        target_cols = max(target_cols, 1)
+
         table_kids = pikepdf.Array()
         table_elem = pdf.make_indirect(pikepdf.Dictionary({
             "/Type": pikepdf.Name("/StructElem"),
@@ -988,21 +1271,31 @@ def _group_and_add_children(pdf: pikepdf.Pdf, doc_elem, doc_kids,
             "/K": table_kids,
         }))
 
-        # Group cells into rows. Since we process sequentially, we create
-        # one /TR per consecutive group. Each cell becomes a child of /TR.
-        tr_kids = pikepdf.Array()
-        tr_elem = pdf.make_indirect(pikepdf.Dictionary({
-            "/Type": pikepdf.Name("/StructElem"),
-            "/S": pikepdf.Name("/TR"),
-            "/P": table_elem,
-            "/K": tr_kids,
-        }))
+        for _, cells in rows_ordered:
+            tr_kids = pikepdf.Array()
+            tr_elem = pdf.make_indirect(pikepdf.Dictionary({
+                "/Type": pikepdf.Name("/StructElem"),
+                "/S": pikepdf.Name("/TR"),
+                "/P": table_elem,
+                "/K": tr_kids,
+            }))
 
-        for cell_elem in cells:
-            cell_elem[pikepdf.Name("/P")] = tr_elem
-            tr_kids.append(cell_elem)
+            # Include ALL cells for this row (never truncate)
+            for cell_elem in cells:
+                cell_elem[pikepdf.Name("/P")] = tr_elem
+                tr_kids.append(cell_elem)
 
-        table_kids.append(tr_elem)
+            # Pad rows that are shorter than target with empty TD placeholders
+            for _ in range(target_cols - len(cells)):
+                placeholder = pdf.make_indirect(pikepdf.Dictionary({
+                    "/Type": pikepdf.Name("/StructElem"),
+                    "/S": pikepdf.Name("/TD"),
+                    "/P": tr_elem,
+                }))
+                tr_kids.append(placeholder)
+
+            table_kids.append(tr_elem)
+
         doc_kids.append(table_elem)
 
     def _wrap_in_p(child_elem):
@@ -1017,41 +1310,60 @@ def _group_and_add_children(pdf: pikepdf.Pdf, doc_elem, doc_kids,
         child_elem[pikepdf.Name("/P")] = p_elem
         doc_kids.append(p_elem)
 
-    # Accumulate consecutive same-type elements
-    pending_list = []
-    pending_table = []
+    # --- Pass 1: pre-collect all table cells grouped by (table_idx, row_idx) ---
+    # This lets us emit each table completely even when the content stream
+    # interleaves cells with paragraphs (common in InDesign column-major PDFs).
+    all_table_cells: dict = {}       # table_idx -> {row_idx -> [cell_elem, ...]}
+    table_first_pos: dict = {}       # table_idx -> first index in all_leaf_elems
+    for i, (elem, struct_type, row_idx, table_idx) in enumerate(all_leaf_elems):
+        if struct_type in _NEEDS_TABLE and table_idx is not None:
+            if table_idx not in all_table_cells:
+                all_table_cells[table_idx] = {}
+                table_first_pos[table_idx] = i
+            ridx = row_idx if row_idx is not None else 0
+            all_table_cells[table_idx].setdefault(ridx, []).append(elem)
 
-    def _flush_pending():
+    # --- Pass 2: emit elements in order ---
+    pending_list = []
+    emitted_tables: set = set()
+
+    def _flush_list_pending():
         if pending_list:
             _flush_list(pending_list)
             pending_list.clear()
-        if pending_table:
-            _flush_table(pending_table)
-            pending_table.clear()
 
-    for elem, struct_type in all_leaf_elems:
+    for i, (elem, struct_type, row_idx, table_idx) in enumerate(all_leaf_elems):
         if struct_type in _NEEDS_LIST:
-            if pending_table:
-                _flush_table(pending_table)
-                pending_table.clear()
+            # Accumulate consecutive list items — do NOT flush the list here
             pending_list.append(elem)
         elif struct_type in _NEEDS_TABLE:
-            if pending_list:
-                _flush_list(pending_list)
-                pending_list.clear()
-            pending_table.append(elem)
+            _flush_list_pending()
+            tidx = table_idx if table_idx is not None else id(elem)
+            if tidx not in emitted_tables:
+                # Emit the complete table now (all rows/cells collected in pass 1)
+                emitted_tables.add(tidx)
+                rows_dict = all_table_cells.get(tidx, {})
+                if not rows_dict:
+                    ridx_key = row_idx if row_idx is not None else 0
+                    rows_dict = {ridx_key: [elem]}
+                cell_pairs = []
+                for ridx_key in sorted(rows_dict.keys()):
+                    for cell_elem in rows_dict[ridx_key]:
+                        cell_pairs.append((cell_elem, ridx_key))
+                _flush_table(cell_pairs)
+            # Subsequent cells of the same table are already emitted — skip
         elif struct_type in _NEEDS_P_WRAP:
-            # Inline element — flush pending groups, then wrap in /P
-            _flush_pending()
+            # Inline element — flush pending list, then wrap in /P
+            _flush_list_pending()
             _wrap_in_p(elem)
         else:
-            # Block-level or neutral element — flush pending, add directly
-            _flush_pending()
+            # Block-level or neutral element — flush pending list, add directly
+            _flush_list_pending()
             elem[pikepdf.Name("/P")] = doc_elem
             doc_kids.append(elem)
 
-    # Flush remaining
-    _flush_pending()
+    # Flush remaining list
+    _flush_list_pending()
 
 
 

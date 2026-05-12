@@ -65,6 +65,7 @@ class ImageBlock:
     page_number: int
     alt_text: str = ""
     is_decorative: bool = False
+    is_vector_figure: bool = False  # True for vector/form figures (no raster image data)
 
 
 @dataclass
