@@ -313,24 +313,27 @@ def _classify_xobjects(page) -> tuple[set, dict]:
     return image_names, form_objs
 
 
-def _parse_image_occurrences(page, watermark_form_names: set) -> list:
-    """Parse page content stream; emit ImageOccurrence per Image-XObject Do.
-
-    Tracks CTM (via q/Q/cm) and innermost MCID (via BDC/EMC). Does NOT recurse
-    into Form XObjects here — Task 6 extends this with Form descent.
-    """
-    image_names, _ = _classify_xobjects(page)
-    if not image_names:
-        return []
-
+def _walk_content_stream(
+    stream_obj,
+    current_ctm: list[float],
+    in_watermark: bool,
+    image_names: set,
+    form_objs: dict,
+    watermark_form_names: set,
+    occurrences: list,
+    visited_forms: set,
+    depth: int = 0,
+) -> None:
+    """Walk one content stream and recurse into Form XObjects with concat CTM."""
+    if depth > 10:
+        logger.debug("Form XObject recursion depth limit hit; stopping")
+        return
     try:
-        ops = pikepdf.parse_content_stream(page)
-    except Exception as e:
-        logger.debug("Could not parse content stream: %s", e)
-        return []
+        ops = pikepdf.parse_content_stream(stream_obj)
+    except Exception:
+        return
 
-    occurrences: list[ImageOccurrence] = []
-    ctm_stack: list[list[float]] = [[1.0, 0.0, 0.0, 1.0, 0.0, 0.0]]
+    ctm_stack: list[list[float]] = [list(current_ctm)]
     mcid_stack: list[Optional[int]] = []
 
     for operands, op in ops:
@@ -368,7 +371,48 @@ def _parse_image_occurrences(page, watermark_form_names: set) -> list:
                     xobject_name=xobj_name,
                     page_bbox=bbox,
                     mcid=innermost,
-                    in_watermark_ancestor=(xobj_name in watermark_form_names),
+                    in_watermark_ancestor=in_watermark,
                 ))
+            elif xobj_name in form_objs:
+                form_obj = form_objs[xobj_name]
+                form_id = id(form_obj)
+                if form_id in visited_forms:
+                    continue
+                visited_forms.add(form_id)
+                form_is_watermark = in_watermark or (xobj_name in watermark_form_names)
+                inner_images, inner_forms = _classify_xobjects(form_obj)
+                _walk_content_stream(
+                    stream_obj=form_obj,
+                    current_ctm=ctm_stack[-1],
+                    in_watermark=form_is_watermark,
+                    image_names=inner_images,
+                    form_objs=inner_forms,
+                    watermark_form_names=watermark_form_names,
+                    occurrences=occurrences,
+                    visited_forms=visited_forms,
+                    depth=depth + 1,
+                )
 
+
+def _parse_image_occurrences(page, watermark_form_names: set) -> list:
+    """Parse page content stream + recurse into Forms; emit ImageOccurrence list.
+
+    Tracks CTM (via q/Q/cm) and innermost MCID (via BDC/EMC). Descends into
+    Form XObjects with concatenated CTM so nested Image XObjects are found.
+    """
+    image_names, form_objs = _classify_xobjects(page)
+    if not image_names and not form_objs:
+        return []
+
+    occurrences: list[ImageOccurrence] = []
+    _walk_content_stream(
+        stream_obj=page,
+        current_ctm=[1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        in_watermark=False,
+        image_names=image_names,
+        form_objs=form_objs,
+        watermark_form_names=watermark_form_names,
+        occurrences=occurrences,
+        visited_forms=set(),
+    )
     return occurrences

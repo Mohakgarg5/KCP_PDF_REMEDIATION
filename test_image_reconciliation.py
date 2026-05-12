@@ -353,5 +353,100 @@ class TestContentStreamParser(unittest.TestCase):
         self.assertEqual(result[1].page_bbox.x0, 250)
 
 
+class TestFormXObjectDescent(unittest.TestCase):
+    """Image XObjects inside a Form XObject must be discovered with combined CTM."""
+
+    def test_image_inside_form_xobject(self):
+        from image_reconciliation import _parse_image_occurrences
+        Name = pikepdf_mod.Name
+        Op = pikepdf_mod.Operator
+
+        img_obj = MagicMock()
+        img_obj.get.side_effect = {"/Subtype": Name("/Image")}.get
+        img_obj.objgen = (10, 0)
+
+        form_xobj_dict = MagicMock()
+        form_xobj_dict.items.return_value = [(Name("/Im0"), img_obj)]
+        form_xobj_dict.get.side_effect = {Name("/Im0"): img_obj}.get
+        form_resources = MagicMock()
+        form_resources.get.side_effect = {"/XObject": form_xobj_dict}.get
+
+        form_obj = MagicMock()
+        form_obj.get.side_effect = lambda k: {
+            "/Subtype": Name("/Form"),
+            "/Resources": form_resources,
+        }.get(k)
+        form_obj.objgen = (20, 0)
+
+        form_ops = [
+            ([50, 0, 0, 50, 10, 20], Op("cm")),
+            ([Name("/Im0")], Op("Do")),
+        ]
+
+        page_xobjs = MagicMock()
+        page_xobjs.items.return_value = [(Name("/F0"), form_obj)]
+        page_xobjs.get.side_effect = {Name("/F0"): form_obj}.get
+        page_resources = MagicMock()
+        page_resources.get.side_effect = {"/XObject": page_xobjs}.get
+        page = MagicMock()
+        page.get.side_effect = {"/Resources": page_resources}.get
+
+        page_ops = [
+            ([100, 0, 0, 100, 200, 300], Op("cm")),
+            ([Name("/F0")], Op("Do")),
+        ]
+        def fake_parse(arg):
+            return page_ops if arg is page else form_ops
+        pikepdf_mod.parse_content_stream = MagicMock(side_effect=fake_parse)
+
+        result = _parse_image_occurrences(page, watermark_form_names=set())
+        # Page CTM × form CTM: combined scale = 50×100 = 5000;
+        # combined translate = (10×100+200, 20×100+300) = (1200, 2300)
+        self.assertEqual(len(result), 1)
+        bbox = result[0].page_bbox
+        self.assertAlmostEqual(bbox.x0, 1200)
+        self.assertAlmostEqual(bbox.y0, 2300)
+        self.assertAlmostEqual(bbox.x1, 6200)
+        self.assertAlmostEqual(bbox.y1, 7300)
+
+    def test_image_inside_watermark_form_marked(self):
+        from image_reconciliation import _parse_image_occurrences
+        Name = pikepdf_mod.Name
+        Op = pikepdf_mod.Operator
+
+        img_obj = MagicMock()
+        img_obj.get.side_effect = {"/Subtype": Name("/Image")}.get
+        img_obj.objgen = (11, 0)
+        form_xobj_dict = MagicMock()
+        form_xobj_dict.items.return_value = [(Name("/Im0"), img_obj)]
+        form_xobj_dict.get.side_effect = {Name("/Im0"): img_obj}.get
+        form_resources = MagicMock()
+        form_resources.get.side_effect = {"/XObject": form_xobj_dict}.get
+        form_obj = MagicMock()
+        form_obj.get.side_effect = lambda k: {
+            "/Subtype": Name("/Form"),
+            "/Resources": form_resources,
+        }.get(k)
+        form_obj.objgen = (21, 0)
+        form_ops = [([1, 0, 0, 1, 0, 0], Op("cm")),
+                    ([Name("/Im0")], Op("Do"))]
+        page_xobjs = MagicMock()
+        page_xobjs.items.return_value = [(Name("/WM"), form_obj)]
+        page_xobjs.get.side_effect = {Name("/WM"): form_obj}.get
+        page_resources = MagicMock()
+        page_resources.get.side_effect = {"/XObject": page_xobjs}.get
+        page = MagicMock()
+        page.get.side_effect = {"/Resources": page_resources}.get
+        page_ops = [([1, 0, 0, 1, 0, 0], Op("cm")),
+                    ([Name("/WM")], Op("Do"))]
+        def fake_parse(arg):
+            return page_ops if arg is page else form_ops
+        pikepdf_mod.parse_content_stream = MagicMock(side_effect=fake_parse)
+
+        result = _parse_image_occurrences(page, watermark_form_names={"/WM"})
+        self.assertEqual(len(result), 1)
+        self.assertTrue(result[0].in_watermark_ancestor)
+
+
 if __name__ == "__main__":
     unittest.main()
