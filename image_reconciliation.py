@@ -268,3 +268,107 @@ def _read_source_struct_elements(pdf) -> dict[int, list[SourceStructElement]]:
         logger.debug("Struct tree walk failed: %s", e)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Content stream parser
+# ---------------------------------------------------------------------------
+
+def _matrix_multiply(m1: list[float], m2: list[float]) -> list[float]:
+    """Multiply two PDF CTM matrices (6-element form, returns m1 × m2)."""
+    a1, b1, c1, d1, e1, f1 = m1
+    a2, b2, c2, d2, e2, f2 = m2
+    return [
+        a1 * a2 + b1 * c2,
+        a1 * b2 + b1 * d2,
+        c1 * a2 + d1 * c2,
+        c1 * b2 + d1 * d2,
+        e1 * a2 + f1 * c2 + e2,
+        e1 * b2 + f1 * d2 + f2,
+    ]
+
+
+def _classify_xobjects(page) -> tuple[set, dict]:
+    """Return (image_xobject_names, form_xobjects_by_name) on this page/form."""
+    image_names: set[str] = set()
+    form_objs: dict[str, object] = {}
+    try:
+        resources = page.get("/Resources")
+        if resources is None:
+            return image_names, form_objs
+        xobjects = resources.get("/XObject")
+        if xobjects is None:
+            return image_names, form_objs
+        for name, obj in xobjects.items():
+            try:
+                subtype = obj.get("/Subtype")
+                if subtype == pikepdf.Name("/Image"):
+                    image_names.add(str(name))
+                elif subtype == pikepdf.Name("/Form"):
+                    form_objs[str(name)] = obj
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return image_names, form_objs
+
+
+def _parse_image_occurrences(page, watermark_form_names: set) -> list:
+    """Parse page content stream; emit ImageOccurrence per Image-XObject Do.
+
+    Tracks CTM (via q/Q/cm) and innermost MCID (via BDC/EMC). Does NOT recurse
+    into Form XObjects here — Task 6 extends this with Form descent.
+    """
+    image_names, _ = _classify_xobjects(page)
+    if not image_names:
+        return []
+
+    try:
+        ops = pikepdf.parse_content_stream(page)
+    except Exception as e:
+        logger.debug("Could not parse content stream: %s", e)
+        return []
+
+    occurrences: list[ImageOccurrence] = []
+    ctm_stack: list[list[float]] = [[1.0, 0.0, 0.0, 1.0, 0.0, 0.0]]
+    mcid_stack: list[Optional[int]] = []
+
+    for operands, op in ops:
+        op_str = str(op)
+        if op_str == "q":
+            ctm_stack.append(list(ctm_stack[-1]))
+        elif op_str == "Q":
+            if len(ctm_stack) > 1:
+                ctm_stack.pop()
+        elif op_str == "cm" and len(operands) >= 6:
+            local = [float(operands[i]) for i in range(6)]
+            ctm_stack[-1] = _matrix_multiply(local, ctm_stack[-1])
+        elif op_str in ("BDC", "BMC"):
+            mcid: Optional[int] = None
+            if op_str == "BDC" and len(operands) >= 2:
+                props = operands[1]
+                try:
+                    raw = props.get(pikepdf.Name("/MCID"))
+                    if raw is not None:
+                        mcid = int(raw)
+                except Exception:
+                    mcid = None
+            mcid_stack.append(mcid)
+        elif op_str == "EMC":
+            if mcid_stack:
+                mcid_stack.pop()
+        elif op_str == "Do" and operands:
+            xobj_name = str(operands[0])
+            if xobj_name in image_names:
+                bbox = _bbox_from_ctm(ctm_stack[-1])
+                innermost = next(
+                    (m for m in reversed(mcid_stack) if m is not None), None
+                )
+                occurrences.append(ImageOccurrence(
+                    xobject_name=xobj_name,
+                    page_bbox=bbox,
+                    mcid=innermost,
+                    in_watermark_ancestor=(xobj_name in watermark_form_names),
+                ))
+
+    return occurrences

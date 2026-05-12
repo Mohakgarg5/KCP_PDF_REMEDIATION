@@ -274,5 +274,84 @@ class TestStructTreeReader(unittest.TestCase):
         self.assertEqual(result[0][0].alt_text, "Buried")
 
 
+class TestContentStreamParser(unittest.TestCase):
+    """Parses operators to emit one ImageOccurrence per Image-XObject Do."""
+
+    def _ops(self, *items):
+        Op = pikepdf_mod.Operator
+        return [(list(operands), Op(op_str)) for op_str, *operands in items]
+
+    def _page_with_image_xobjects(self, image_names):
+        Name = pikepdf_mod.Name
+        xobjs = {}
+        for n in image_names:
+            obj = MagicMock()
+            obj.get.side_effect = {"/Subtype": Name("/Image")}.get
+            obj.objgen = (id(obj), 0)
+            xobjs[Name(n)] = obj
+        xobj_dict = MagicMock()
+        xobj_dict.items.return_value = list(xobjs.items())
+        xobj_dict.get.side_effect = xobjs.get
+        resources = MagicMock()
+        resources.get.side_effect = {"/XObject": xobj_dict}.get
+        page = MagicMock()
+        page.get.side_effect = {"/Resources": resources}.get
+        return page
+
+    def test_single_image_identity_ctm(self):
+        from image_reconciliation import _parse_image_occurrences
+        page = self._page_with_image_xobjects(["/Im0"])
+        ops = self._ops(
+            ("cm", 100, 0, 0, 50, 200, 300),
+            ("Do", pikepdf_mod.Name("/Im0")),
+        )
+        pikepdf_mod.parse_content_stream = MagicMock(return_value=ops)
+
+        result = _parse_image_occurrences(page, watermark_form_names=set())
+
+        self.assertEqual(len(result), 1)
+        occ = result[0]
+        self.assertEqual(occ.xobject_name, "/Im0")
+        self.assertEqual((occ.page_bbox.x0, occ.page_bbox.y0,
+                          occ.page_bbox.x1, occ.page_bbox.y1),
+                         (200, 300, 300, 350))
+        self.assertIsNone(occ.mcid)
+        self.assertFalse(occ.in_watermark_ancestor)
+
+    def test_mcid_captured_from_bdc(self):
+        from image_reconciliation import _parse_image_occurrences
+        page = self._page_with_image_xobjects(["/Im0"])
+        props = MagicMock()
+        props.get.side_effect = {pikepdf_mod.Name("/MCID"): 7}.get
+        ops = self._ops(
+            ("BDC", pikepdf_mod.Name("/Figure"), props),
+            ("cm", 50, 0, 0, 50, 0, 0),
+            ("Do", pikepdf_mod.Name("/Im0")),
+            ("EMC",),
+        )
+        pikepdf_mod.parse_content_stream = MagicMock(return_value=ops)
+        result = _parse_image_occurrences(page, watermark_form_names=set())
+        self.assertEqual(result[0].mcid, 7)
+
+    def test_two_horizontal_images_distinct_ctm(self):
+        from image_reconciliation import _parse_image_occurrences
+        page = self._page_with_image_xobjects(["/Im0", "/Im1"])
+        ops = self._ops(
+            ("q",),
+            ("cm", 100, 0, 0, 100, 50, 400),
+            ("Do", pikepdf_mod.Name("/Im0")),
+            ("Q",),
+            ("q",),
+            ("cm", 100, 0, 0, 100, 250, 400),
+            ("Do", pikepdf_mod.Name("/Im1")),
+            ("Q",),
+        )
+        pikepdf_mod.parse_content_stream = MagicMock(return_value=ops)
+        result = _parse_image_occurrences(page, watermark_form_names=set())
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0].page_bbox.x0, 50)
+        self.assertEqual(result[1].page_bbox.x0, 250)
+
+
 if __name__ == "__main__":
     unittest.main()
