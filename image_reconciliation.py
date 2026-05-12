@@ -67,7 +67,7 @@ class ImageOccurrence:
 # CTM math
 # ---------------------------------------------------------------------------
 
-def _apply_ctm(ctm: list, x: float, y: float) -> tuple:
+def _apply_ctm(ctm: list[float], x: float, y: float) -> tuple[float, float]:
     """Apply 6-element CTM [a, b, c, d, e, f] to (x, y).
 
     Per PDF spec: x' = a*x + c*y + e;  y' = b*x + d*y + f.
@@ -76,7 +76,7 @@ def _apply_ctm(ctm: list, x: float, y: float) -> tuple:
     return (a * x + c * y + e, b * x + d * y + f)
 
 
-def _bbox_from_ctm(ctm: list) -> BBox:
+def _bbox_from_ctm(ctm: list[float]) -> BBox:
     """Compute axis-aligned page-space bbox of the unit-square image after CTM.
 
     Maps all four image-space corners (0,0),(1,0),(0,1),(1,1) through the
