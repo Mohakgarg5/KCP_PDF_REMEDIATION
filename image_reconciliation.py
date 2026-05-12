@@ -16,14 +16,121 @@ decoratively-marked logos.
 from dataclasses import dataclass, field
 from typing import Optional
 import logging
+import re
 
 import pikepdf
 
 from models import BBox
 
-__all__ = ["ResolvedImage", "reconcile_page_images"]
+__all__ = ["ResolvedImage", "reconcile_page_images", "detect_watermark_forms"]
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Watermark detection
+# ---------------------------------------------------------------------------
+
+_WATERMARK_KEYWORDS = [
+    # English
+    "draft", "confidential", "copy", "do not",
+    "sample", "watermark", "instructor", "reproduce",
+    "preliminary", "internal", "restricted", "void",
+    "duplicate", "unofficial", "not for distribution",
+    "review", "not for publication", "internal use",
+    "proprietary", "for review", "proof",
+    # French
+    "brouillon", "confidentiel", "copie", "ne pas",
+    "projet", "filigrane",
+    # German
+    "entwurf", "vertraulich", "kopie", "muster",
+    "wasserzeichen",
+    # Spanish
+    "borrador", "confidencial", "copia", "muestra",
+]
+
+
+def _resolve_page_xobjects(page):
+    """Get a page's /XObject dictionary, walking inherited Resources if needed."""
+    try:
+        res = page.get("/Resources")
+        if res is None:
+            parent = page.get("/Parent")
+            while parent is not None and res is None:
+                res = parent.get("/Resources")
+                parent = parent.get("/Parent")
+        if res is None:
+            return None
+        return res.get("/XObject")
+    except Exception:
+        return None
+
+
+def detect_watermark_forms(page) -> set:
+    """Return set of XObject names that are watermark Form XObjects.
+
+    A Form XObject is treated as a watermark when any of these match:
+      - Adobe PieceInfo marks it /Watermark
+      - Optional-Content layer name contains 'watermark'
+      - Form content stream contains watermark keywords (DRAFT, COPY, ...)
+
+    This logic was previously private in pdf_tagger; it now lives here so the
+    image reconciliation extractor and the tagger share one source of truth.
+    """
+    wm_names: set[str] = set()
+    xobjects = _resolve_page_xobjects(page)
+    if not xobjects:
+        return wm_names
+
+    for name, obj in xobjects.items():
+        try:
+            if not hasattr(obj, "keys"):
+                continue
+            if obj.get("/Subtype") != pikepdf.Name.Form:
+                continue
+
+            piece_info = obj.get("/PieceInfo")
+            if piece_info:
+                compound = piece_info.get("/ADBE_CompoundType")
+                if compound:
+                    private = compound.get("/Private")
+                    if private and str(private) == "/Watermark":
+                        wm_names.add(str(name))
+                        continue
+
+            oc = obj.get("/OC")
+            if oc:
+                oc_name = ""
+                try:
+                    if "/Name" in oc:
+                        oc_name = str(oc["/Name"])
+                    elif "/OCGs" in oc:
+                        for ocg in oc["/OCGs"]:
+                            if "/Name" in ocg:
+                                oc_name = str(ocg["/Name"])
+                                break
+                except Exception:
+                    pass
+                if "watermark" in oc_name.lower():
+                    wm_names.add(str(name))
+                    continue
+
+            try:
+                data = obj.read_bytes().decode("latin-1", errors="replace")
+            except Exception:
+                continue
+            if len(data) > 10000:
+                continue
+            tj_texts = re.findall(r"\((.*?)\)", data)
+            full_text = " ".join(tj_texts).strip().lower()
+
+            if any(kw in full_text for kw in _WATERMARK_KEYWORDS):
+                wm_names.add(str(name))
+        except Exception as e:
+            logger.debug("Watermark detection failed for XObject '%s': %s", name, e)
+            continue
+
+    return wm_names
 
 
 # ---------------------------------------------------------------------------

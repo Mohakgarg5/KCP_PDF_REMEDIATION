@@ -353,6 +353,36 @@ class TestContentStreamParser(unittest.TestCase):
         self.assertEqual(result[1].page_bbox.x0, 250)
 
 
+class TestWatermarkDetection(unittest.TestCase):
+    """Form XObjects with Adobe /Watermark marker are detected."""
+
+    def test_adobe_watermark_marker(self):
+        from image_reconciliation import detect_watermark_forms
+        Name = pikepdf_mod.Name
+
+        compound = MagicMock()
+        compound.get.side_effect = {"/Private": Name("/Watermark")}.get
+        piece_info = MagicMock()
+        piece_info.get.side_effect = {"/ADBE_CompoundType": compound}.get
+
+        form_obj = MagicMock(spec=["get", "keys"])
+        form_obj.keys = MagicMock(return_value=["/Subtype", "/PieceInfo"])
+        form_obj.get.side_effect = {
+            "/Subtype": pikepdf_mod.Name.Form,
+            "/PieceInfo": piece_info,
+        }.get
+
+        xobj_dict = MagicMock()
+        xobj_dict.items.return_value = [(Name("/WM"), form_obj)]
+        resources = MagicMock()
+        resources.get.side_effect = {"/XObject": xobj_dict}.get
+        page = MagicMock()
+        page.get.side_effect = {"/Resources": resources}.get
+
+        result = detect_watermark_forms(page)
+        self.assertIn("/WM", result)
+
+
 class TestFormXObjectDescent(unittest.TestCase):
     """Image XObjects inside a Form XObject must be discovered with combined CTM."""
 

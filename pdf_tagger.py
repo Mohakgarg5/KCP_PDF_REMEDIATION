@@ -907,88 +907,12 @@ def _find_vector_figure_block(blocks: list) -> Optional[int]:
 
 
 # ---------------------------------------------------------------------------
-# Watermark detection
+# Watermark detection — moved to image_reconciliation.py so the extractor and
+# tagger share one implementation.  Local alias preserves the private name
+# already used inside this module.
 # ---------------------------------------------------------------------------
 
-_WATERMARK_KEYWORDS = [
-    # English
-    "draft", "confidential", "copy", "do not",
-    "sample", "watermark", "instructor", "reproduce",
-    "preliminary", "internal", "restricted", "void",
-    "duplicate", "unofficial", "not for distribution",
-    "review", "not for publication", "internal use",
-    "proprietary", "for review", "proof",
-    # French
-    "brouillon", "confidentiel", "copie", "ne pas",
-    "projet", "filigrane",
-    # German
-    "entwurf", "vertraulich", "kopie", "muster",
-    "wasserzeichen",
-    # Spanish
-    "borrador", "confidencial", "copia", "muestra",
-]
-
-
-def _detect_watermark_forms(page) -> set:
-    """Return set of XObject names that are watermark Form XObjects."""
-    wm_names = set()
-    xobjects = _get_xobjects(page)
-    if not xobjects:
-        return wm_names
-
-    for name, obj in xobjects.items():
-        try:
-            if not hasattr(obj, "keys"):
-                continue
-            if obj.get("/Subtype") != pikepdf.Name.Form:
-                continue
-
-            # Check for Adobe watermark marker
-            piece_info = obj.get("/PieceInfo")
-            if piece_info:
-                compound = piece_info.get("/ADBE_CompoundType")
-                if compound:
-                    private = compound.get("/Private")
-                    if private and str(private) == "/Watermark":
-                        wm_names.add(str(name))
-                        continue
-
-            # Check for Optional Content group named "Watermark"
-            oc = obj.get("/OC")
-            if oc:
-                oc_name = ""
-                try:
-                    if "/Name" in oc:
-                        oc_name = str(oc["/Name"])
-                    elif "/OCGs" in oc:
-                        for ocg in oc["/OCGs"]:
-                            if "/Name" in ocg:
-                                oc_name = str(ocg["/Name"])
-                                break
-                except Exception:
-                    pass
-                if "watermark" in oc_name.lower():
-                    wm_names.add(str(name))
-                    continue
-
-            # Check content for watermark keywords
-            try:
-                data = obj.read_bytes().decode("latin-1", errors="replace")
-            except Exception:
-                continue
-            # Only check if stream is small (avoid processing huge Form XObjects)
-            if len(data) > 10000:
-                continue
-            tj_texts = re.findall(r"\((.*?)\)", data)
-            full_text = " ".join(tj_texts).strip().lower()
-
-            if any(kw in full_text for kw in _WATERMARK_KEYWORDS):
-                wm_names.add(str(name))
-        except Exception as e:
-            logger.debug("Watermark detection failed for XObject '%s': %s", name, e)
-            continue
-
-    return wm_names
+from image_reconciliation import detect_watermark_forms as _detect_watermark_forms
 
 
 # ---------------------------------------------------------------------------
