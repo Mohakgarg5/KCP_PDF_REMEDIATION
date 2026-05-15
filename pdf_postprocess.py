@@ -593,7 +593,7 @@ _FONT_FILE_NAMES = {
     "Calibri": ["Calibri.ttf", "calibri.ttf"],
     "Calibri-Bold": ["Calibri Bold.ttf", "calibrib.ttf"],
     "Cambria": ["Cambria.ttf", "cambria.ttf"],
-    # Helvetica → Arial / Liberation Sans fallback
+    # Helvetica → Arial / Liberation Sans fallback (PDF base-14 PostScript names)
     "Helvetica": ["Arial.ttf", "arial.ttf", "LiberationSans-Regular.ttf"],
     "Helvetica,Bold": ["Arial Bold.ttf", "arialbd.ttf", "LiberationSans-Bold.ttf"],
     "Helvetica-Bold": ["Arial Bold.ttf", "arialbd.ttf", "LiberationSans-Bold.ttf"],
@@ -601,6 +601,16 @@ _FONT_FILE_NAMES = {
     "Helvetica-Oblique": ["Arial Italic.ttf", "ariali.ttf", "LiberationSans-Italic.ttf"],
     "Helvetica,BoldItalic": ["Arial Bold Italic.ttf", "arialbi.ttf", "LiberationSans-BoldItalic.ttf"],
     "Helvetica-BoldOblique": ["Arial Bold Italic.ttf", "arialbi.ttf", "LiberationSans-BoldItalic.ttf"],
+    # Times (PDF base-14 PostScript names — distinct from MS TimesNewRoman*MT)
+    "Times-Roman": ["Times New Roman.ttf", "times.ttf", "LiberationSerif-Regular.ttf"],
+    "Times-Bold": ["Times New Roman Bold.ttf", "timesbd.ttf", "LiberationSerif-Bold.ttf"],
+    "Times-Italic": ["Times New Roman Italic.ttf", "timesi.ttf", "LiberationSerif-Italic.ttf"],
+    "Times-BoldItalic": ["Times New Roman Bold Italic.ttf", "timesbi.ttf", "LiberationSerif-BoldItalic.ttf"],
+    # Courier (PDF base-14 PostScript names)
+    "Courier": ["Courier New.ttf", "cour.ttf", "LiberationMono-Regular.ttf"],
+    "Courier-Bold": ["Courier New Bold.ttf", "courbd.ttf", "LiberationMono-Bold.ttf"],
+    "Courier-Oblique": ["Courier New Italic.ttf", "couri.ttf", "LiberationMono-Italic.ttf"],
+    "Courier-BoldOblique": ["Courier New Bold Italic.ttf", "courbi.ttf", "LiberationMono-BoldItalic.ttf"],
 }
 
 # Map PostScript font names to TTC (TrueType Collection) files + font index
@@ -922,6 +932,52 @@ def _try_embed_font(pdf: pikepdf.Pdf, font_obj, base_font: str):
         font_stream = pikepdf.Stream(pdf, font_data)
         font_stream[pikepdf.Name("/Length1")] = len(font_data)
         desc[pikepdf.Name("/FontFile2")] = font_stream
+
+        # FontFile2 carries a TrueType program — the font's Subtype must
+        # agree.  When the source font was Type1 (e.g. the PDF base-14
+        # "Times-Roman" PostScript name), veraPDF rejects FontFile2 under
+        # a /Type1 Subtype.  Flip Subtype to /TrueType so the embedded
+        # program matches the declared font type.
+        subtype = str(font_obj.get("/Subtype", ""))
+        flipped_to_truetype = subtype == "/Type1"
+        if flipped_to_truetype:
+            font_obj[pikepdf.Name("/Subtype")] = pikepdf.Name("/TrueType")
+
+        # Type1 base-14 fonts (Times-Roman, Helvetica, Courier, …) often
+        # omit /FirstChar /LastChar /Widths because Adobe Reader hard-codes
+        # the canonical widths for those fonts.  TrueType has no such
+        # convention — without an explicit /Widths array veraPDF rule
+        # 7.21.5 fires when the glyph widths in the embedded program don't
+        # match the (missing/zero) dictionary widths.  Synthesize the
+        # array from the embedded font's hmtx table.
+        if flipped_to_truetype or "/Widths" not in font_obj:
+            try:
+                cmap = tt.getBestCmap() or {}
+                hmtx = tt.get("hmtx")
+                first_char = 0x20
+                last_char = 0xFF
+                widths_array = []
+                for code in range(first_char, last_char + 1):
+                    if code in _WIN1252_SPECIAL:
+                        unicode_cp = _WIN1252_SPECIAL[code]
+                    elif 0x20 <= code <= 0x7E or 0xA0 <= code <= 0xFF:
+                        unicode_cp = code
+                    else:
+                        unicode_cp = None
+                    if unicode_cp is None or unicode_cp not in cmap:
+                        widths_array.append(0)
+                        continue
+                    glyph_name = cmap[unicode_cp]
+                    metric = hmtx.metrics.get(glyph_name) if hmtx else None
+                    if metric is None:
+                        widths_array.append(0)
+                    else:
+                        widths_array.append(int(round(metric[0] * scale)))
+                font_obj[pikepdf.Name("/FirstChar")] = first_char
+                font_obj[pikepdf.Name("/LastChar")] = last_char
+                font_obj[pikepdf.Name("/Widths")] = pikepdf.Array(widths_array)
+            except Exception as e:
+                logger.debug("Widths synthesis failed for %s: %s", base_font, e)
 
     except Exception as e:
         logger.warning("Font embedding failed for %s: %s", base_font, e)
