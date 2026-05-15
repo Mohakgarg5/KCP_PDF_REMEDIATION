@@ -127,18 +127,19 @@ def _tag_page(pdf, page, page_content: Optional[PageContent],
     blocks = _build_block_index(page_content)
 
     try:
-        ops = list(pikepdf.parse_content_stream(page))
+        raw_ops = list(pikepdf.parse_content_stream(page))
     except Exception:
         # Can't parse → wrap entire page as artifact
         return _tag_page_fallback(pdf, page, page_idx, mcid_counter)
 
-    ops = _strip_markers(ops)
+    ops, source_artifact_mask = _strip_markers_with_artifact_mask(raw_ops)
 
     watermark_forms = _detect_watermark_forms(page)
     link_annots = _collect_link_annots(page)
 
     new_ops, struct_elems = _insert_markers(
-        ops, blocks, page, watermark_forms, mcid_counter, link_annots, pdf=pdf
+        ops, blocks, page, watermark_forms, mcid_counter, link_annots, pdf=pdf,
+        source_artifact_mask=source_artifact_mask,
     )
 
     new_stream_data = pikepdf.unparse_content_stream(new_ops)
@@ -231,6 +232,150 @@ def _strip_markers(ops: list) -> list:
         for operands, op in ops
         if str(op) not in ("BDC", "BMC", "EMC")
     ]
+
+
+def _strip_markers_with_artifact_mask(raw_ops: list) -> tuple:
+    """Strip BDC/BMC/EMC like `_strip_markers`, but also return a bool list
+    `mask` where `mask[i]` is True if the i-th surviving op was originally
+    nested inside a `/Artifact` BDC (or BMC) ... EMC range in the source.
+
+    Used by the vector-figure detector to skip regions the source author
+    already classified as decorative (page-template chrome, watermarks
+    drawn as paths, etc.) so we don't promote them to /Figure.
+    """
+    out_ops: list = []
+    mask: list = []
+    artifact_depth = 0  # nesting count of /Artifact markers we are currently inside
+    bdc_stack: list = []  # stack of bools — True if the open BDC/BMC was /Artifact
+    for operands, op in raw_ops:
+        s = str(op)
+        if s in ("BDC", "BMC"):
+            is_artifact = bool(operands) and str(operands[0]) == "/Artifact"
+            bdc_stack.append(is_artifact)
+            if is_artifact:
+                artifact_depth += 1
+            continue
+        if s == "EMC":
+            if bdc_stack:
+                was_artifact = bdc_stack.pop()
+                if was_artifact and artifact_depth > 0:
+                    artifact_depth -= 1
+            continue
+        out_ops.append((operands, op))
+        mask.append(artifact_depth > 0)
+    return out_ops, mask
+
+
+# Operator categories used by the vector-figure detector below.
+_PATH_OPS = frozenset({
+    "m", "l", "c", "v", "y", "re", "f", "F", "f*",
+    "B", "b", "S", "s", "B*", "b*", "n", "h", "W", "W*",
+})
+_TEXT_OPS = frozenset({"Tj", "TJ", "'", '"', "BT", "ET"})
+_XOBJECT_OPS = frozenset({"Do", "BI", "ID", "EI"})
+
+
+def _detect_vector_figure_regions(
+    ops: list,
+    min_path_ops: int = 6,
+    max_text_in_region: int = 3,
+    merge_gap: int = 80,
+) -> list:
+    """Find op-index ranges to wrap as a single /Figure structure element.
+
+    Many InDesign / Word PDFs draw charts (line, bar, scatter, pie) as
+    raw path operators directly in the page content stream — not as
+    Image XObjects, not as Form XObjects.  Without explicit handling
+    every path defaults to /Artifact (decorative) and the graph becomes
+    invisible to screen readers.
+
+    Strategy:
+      1. Identify top-level `q ... Q` graphics-state blocks dominated
+         by path operators (>= `min_path_ops`) with little or no text
+         and no XObject `Do` references.  These are typically a single
+         chart primitive emitted by InDesign.
+      2. Merge spatially adjacent blocks (separated by <= `merge_gap`
+         ops with no Tj/TJ/Do between them) so a chart composed of
+         hundreds of small q/Q primitives ends up as ONE Figure rather
+         than hundreds of fragmented Figures.
+
+    Returns a list of (start_op_idx, end_op_idx) tuples whose op
+    positions refer to the input `ops` list (post-strip).  The caller
+    wraps each range as `/Figure ... EMC` with an MCID.
+
+    Implementation note: single pass, merging inline.  We track the
+    index of the most recent text/XObject op (`last_significant_idx`)
+    so merges are decided with an O(1) comparison instead of rescanning
+    the gap — keeps memory flat on pages with thousands of path ops.
+    """
+    merged: list = []
+    cur_start = cur_end = -1  # currently-extending region; -1 means none
+    last_significant_idx = -1  # max idx of any text or XObject operator
+
+    depth = 0
+    q_idx = -1
+    path_count = text_count = do_count = 0
+
+    for i, (_, operator) in enumerate(ops):
+        s = str(operator)
+        if s == "q":
+            if depth == 0:
+                q_idx = i
+                path_count = text_count = do_count = 0
+            depth += 1
+            continue
+        if s == "Q":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and q_idx >= 0:
+                    qualifies = (
+                        path_count >= min_path_ops
+                        and text_count <= max_text_in_region
+                        and do_count == 0
+                    )
+                    if qualifies:
+                        if cur_end >= 0 and (q_idx - cur_end - 1) <= merge_gap \
+                                and last_significant_idx <= cur_end:
+                            cur_end = i
+                        else:
+                            if cur_end >= 0:
+                                merged.append((cur_start, cur_end))
+                            cur_start, cur_end = q_idx, i
+                    q_idx = -1
+            continue
+        if s in _TEXT_OPS:
+            last_significant_idx = i
+            if depth > 0:
+                text_count += 1
+        elif s in _XOBJECT_OPS:
+            last_significant_idx = i
+            if depth > 0:
+                do_count += 1
+        elif depth > 0 and s in _PATH_OPS:
+            path_count += 1
+
+    if cur_end >= 0:
+        merged.append((cur_start, cur_end))
+
+    return merged
+
+
+def _region_is_source_artifact(start: int, end: int, mask: list) -> bool:
+    """Return True if the op-range [start..end] was predominantly inside a
+    /Artifact marker in the source content stream.
+
+    Used to suppress vector-figure detection on regions the author had
+    already marked decorative — page-template chrome, vector watermarks,
+    etc. — so we don't promote them to /Figure.
+    """
+    if not mask or start >= len(mask):
+        return False
+    end = min(end, len(mask) - 1)
+    span = end - start + 1
+    if span <= 0:
+        return False
+    hits = sum(1 for i in range(start, end + 1) if mask[i])
+    return hits * 2 >= span  # >= 50% of the region inside a source /Artifact
 
 
 def _collect_link_annots(page) -> list:
@@ -349,7 +494,7 @@ def _clean_form_xobject_markers(pdf: pikepdf.Pdf, page, xobj_name: str):
 
 
 def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
-                    link_annots=None, pdf=None):
+                    link_annots=None, pdf=None, source_artifact_mask=None):
     """Walk through content stream ops, inserting BDC/EMC structure markers.
 
     Uses an "artifact-as-default" strategy so nothing is ever untagged.
@@ -385,6 +530,29 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
     artifact_open = False
     struct_open = False
     current_block_idx = -1
+
+    # Vector-figure cluster detection: pre-scan ops for top-level q/Q
+    # blocks dominated by path operators and merge adjacent clusters.
+    # When the main loop reaches a region start, it emits a /Figure BDC
+    # before the `q`, suppresses normal artifact/struct handling until
+    # the matching `Q`, then emits EMC.  This is what tags raw vector
+    # graph content (line graphs, bar charts, pie charts) as figures
+    # instead of decorative artifacts.
+    figure_regions = _detect_vector_figure_regions(ops)
+    # Filter out regions whose content was tagged /Artifact in the source —
+    # respects authorial intent for decorative page-template chrome that
+    # happens to be drawn with many path operators (InDesign cover flourish,
+    # watermarks, etc.).  Only applies when we received a source mask.
+    if source_artifact_mask is not None and figure_regions:
+        figure_regions = [
+            (s, e) for (s, e) in figure_regions
+            if not _region_is_source_artifact(s, e, source_artifact_mask)
+        ]
+    next_figure_idx = 0  # pointer into figure_regions; avoids a start→end dict
+    in_figure_region = False
+    figure_region_end_idx = -1
+    figure_region_mcid = -1
+    figure_region_bbox = None  # accumulated min/max in page coords
 
     def _open_artifact():
         nonlocal artifact_open
@@ -550,8 +718,107 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
     # -- start with artifact wrapper --
     _open_artifact()
 
-    for operands, operator in ops:
+    for idx, (operands, operator) in enumerate(ops):
         op = str(operator)
+
+        # ---- Vector-figure region: enter on q ----
+        # If this op starts a detected figure region, emit /Figure BDC
+        # before the q and suppress normal artifact/struct handling
+        # until the matching Q.
+        if (not in_figure_region
+                and next_figure_idx < len(figure_regions)
+                and idx == figure_regions[next_figure_idx][0]):
+            _close_struct()
+            _close_artifact()
+            figure_mcid = mcid_counter[0]
+            mcid_counter[0] += 1
+            # If a source vector-figure block carries an alt text (set by
+            # image_reconciliation from a source /Figure with /Alt that has
+            # no matching Image Do), consume it here so hand-written alts on
+            # charts survive into the output.  Otherwise fall back to
+            # the generic "Figure" placeholder.
+            vec_idx = _find_vector_figure_block(blocks)
+            if vec_idx is not None and blocks[vec_idx].get("alt_text"):
+                blocks[vec_idx]["used"] = True
+                figure_region_alt = blocks[vec_idx]["alt_text"]
+            else:
+                figure_region_alt = "Figure"
+            new_ops.append((
+                [pikepdf.Name("/Figure"),
+                 pikepdf.Dictionary({"/MCID": figure_mcid})],
+                pikepdf.Operator("BDC"),
+            ))
+            in_figure_region = True
+            figure_region_end_idx = figure_regions[next_figure_idx][1]
+            next_figure_idx += 1
+            figure_region_mcid = figure_mcid
+            figure_region_bbox = None
+            # Fall through to emit the q (handled below in the figure branch)
+
+        if in_figure_region:
+            # Maintain ctm tracking even inside the figure so post-figure
+            # ops have correct coordinates.  Also accumulate a bbox from
+            # path-op coordinates transformed through the current CTM so
+            # the resulting /Figure carries a usable /BBox.
+            if op == "q":
+                ctm_stack.append(ctm[:])
+            elif op == "Q":
+                if ctm_stack:
+                    ctm = ctm_stack.pop()
+            elif op == "cm" and len(operands) >= 6:
+                m = [_safe_float(operands[j]) for j in range(6)]
+                ctm = _mat_mul(m, ctm)
+            elif op in ("m", "l") and len(operands) >= 2:
+                try:
+                    x = _safe_float(operands[0])
+                    y = _safe_float(operands[1])
+                    ux = ctm[0] * x + ctm[2] * y + ctm[4]
+                    uy = ctm[1] * x + ctm[3] * y + ctm[5]
+                    if figure_region_bbox is None:
+                        figure_region_bbox = [ux, uy, ux, uy]
+                    else:
+                        figure_region_bbox[0] = min(figure_region_bbox[0], ux)
+                        figure_region_bbox[1] = min(figure_region_bbox[1], uy)
+                        figure_region_bbox[2] = max(figure_region_bbox[2], ux)
+                        figure_region_bbox[3] = max(figure_region_bbox[3], uy)
+                except Exception:
+                    pass
+            elif op == "re" and len(operands) >= 4:
+                try:
+                    x = _safe_float(operands[0])
+                    y = _safe_float(operands[1])
+                    w = _safe_float(operands[2])
+                    h = _safe_float(operands[3])
+                    for cx, cy in ((x, y), (x + w, y), (x + w, y + h), (x, y + h)):
+                        ux = ctm[0] * cx + ctm[2] * cy + ctm[4]
+                        uy = ctm[1] * cx + ctm[3] * cy + ctm[5]
+                        if figure_region_bbox is None:
+                            figure_region_bbox = [ux, uy, ux, uy]
+                        else:
+                            figure_region_bbox[0] = min(figure_region_bbox[0], ux)
+                            figure_region_bbox[1] = min(figure_region_bbox[1], uy)
+                            figure_region_bbox[2] = max(figure_region_bbox[2], ux)
+                            figure_region_bbox[3] = max(figure_region_bbox[3], uy)
+                except Exception:
+                    pass
+
+            new_ops.append((operands, operator))
+
+            if idx == figure_region_end_idx:
+                # Close the /Figure region
+                new_ops.append(([], pikepdf.Operator("EMC")))
+                struct_elems.append((
+                    figure_region_mcid,
+                    "/Figure",
+                    figure_region_alt,
+                    figure_region_bbox,
+                ))
+                in_figure_region = False
+                figure_region_end_idx = -1
+                figure_region_mcid = -1
+                figure_region_bbox = None
+                _open_artifact()
+            continue
 
         # ---- Inline image (BI/ID/EI) → stays in artifact ----
         if op in ("BI", "ID", "EI"):

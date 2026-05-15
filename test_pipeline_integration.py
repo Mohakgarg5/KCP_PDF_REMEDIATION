@@ -142,6 +142,7 @@ class TestPipelineInvariants(unittest.TestCase):
         "brownfield.pdf",
         "unilever_vitality_regular.pdf",
         "unilever_vitality_dnc.pdf",
+        "sugar_daddy_tagged_graphs.pdf",
     ]
 
     @classmethod

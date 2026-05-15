@@ -1,25 +1,95 @@
-# PDF Remediation Tool
+# PDF Accessibility Remediation Pipeline
 
-> Automatically transform any PDF into a **PDF/UA-1 compliant**, fully accessible document — passing PAC and veraPDF validation out of the box.
+> Automatically transform Kellogg case PDFs into **PDF/UA-1 compliant**, screen-reader-ready documents — validated with veraPDF, zero failures.
 
 ---
 
-## Overview
+## Why This Exists
 
-**PdfRemediationTool** is a Python pipeline that takes ordinary PDFs and applies a four-stage remediation process to make them conform to the **PDF/UA-1** (ISO 14289-1) accessibility standard. It handles structure tagging, metadata injection, font embedding, link annotation wiring, and full validation — with both a command-line interface and a Streamlit web UI.
+Kellogg School of Management publishes case study PDFs that students need to read with screen readers and assistive technology. These PDFs, typically exported from Adobe InDesign, lack the structure tags, metadata, and accessibility markup required by the **PDF/UA-1 (ISO 14289-1)** standard. This pipeline fixes that automatically.
 
-### What it fixes
+---
 
-| Issue | How it's handled |
+## What It Does
+
+Drop a PDF in, get a fully accessible PDF out. The pipeline:
+
+| Problem | Solution |
 |---|---|
-| Missing structure tags | Injects `/Document`, `/P`, `/H1`–`/H6`, `/Figure`, `/Table`, `/TR`, `/TD`, `/L`, `/LI` |
-| Untagged images | Adds `/Figure` with `/Alt` text and `/BBox` layout attributes |
-| Missing XMP metadata | Writes `dc:title`, `dc:language`, `pdf:Producer`, `pdfuaid:part` |
-| Unembedded fonts | Locates and embeds font files without disturbing existing metrics |
-| Missing `MarkInfo` | Sets `/Marked true` and `/Suspects false` |
-| Tab order & ViewerPrefs | Sets `/TabOrder /S` on all pages and `DisplayDocTitle true` |
-| Broken link annotations | Wires `/Link` structure elements with both MCR (text) and OBJR (annotation ref) |
-| Watermarks / headers / footers | Tagged as `/Artifact` so they are invisible to screen readers |
+| No structure tags | Injects `/Document`, `/Art`, `/P`, `/H1`-`/H6`, `/Figure`, `/Table`, `/TR`, `/TD`, `/L`, `/LI`, `/Link` |
+| Untagged images | Adds `/Figure` with `/Alt` text, `/BBox` layout attributes, preserves existing alt text |
+| Vector diagrams broken into paths | Wraps Form XObjects as single `/Figure` elements |
+| Missing XMP metadata | Writes `dc:title`, `dc:language`, `pdfuaid:part`, `pdf:Producer` |
+| Missing MarkInfo | Sets `/Marked true`, `/Suspects false` |
+| No tab order / viewer prefs | Sets `/Tabs /S` on all pages, `DisplayDocTitle true` |
+| Broken link annotations | Wires `/Link` structure elements with MCR (text) + OBJR (annotation ref) |
+| Watermarks / running headers | Tagged as `/Artifact` so screen readers skip them |
+| Nested images in containers | Recursively discovers images inside Form XObject hierarchies |
+| InDesign hierarchy lost | Preserves `Document -> Art -> content` structure tree |
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- **Python 3.10+** (developed on 3.12)
+- **Java** (for veraPDF validation)
+- **veraPDF** ([download](https://verapdf.org/software/))
+
+### Setup
+
+```bash
+# Clone the repository
+git clone https://github.com/Mohakgarg5/KCP_PDF_REMEDIATION.git
+cd KCP_PDF_REMEDIATION
+
+# Create virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Set JAVA_HOME (macOS Homebrew example)
+export JAVA_HOME=/opt/homebrew/Cellar/openjdk/25.0.2/libexec/openjdk.jdk/Contents/Home
+```
+
+### Run
+
+```bash
+# Process all PDFs in input/ directory
+python main.py
+
+# Process a single file
+python main.py --input "input/my_case.pdf"
+
+# Custom directories
+python main.py --input-dir docs/ --output-dir accessible_docs/
+
+# Skip veraPDF validation (if Java not available)
+python main.py --skip-validation
+
+# Verbose logging
+python main.py --verbose
+```
+
+Output files are saved as `<original_name>_accessible.pdf` in the output directory.
+
+### Web UI
+
+```bash
+streamlit run app.py
+# Open http://localhost:8501, drag and drop PDFs
+```
+
+### Convenience Script
+
+```bash
+./run.sh                           # Process all PDFs in input/
+./run.sh --input file.pdf          # Single file
+./run.sh --skip-validation         # Skip veraPDF
+```
 
 ---
 
@@ -27,123 +97,66 @@
 
 ```
 input PDF
-    │
-    ▼
-┌──────────────────┐
-│  pdf_extractor   │  Stage 1 — Content extraction & classification
-│                  │  • Parses text blocks, font metrics, bounding boxes
-│                  │  • Detects headings (by font-size ratio), lists, tables
-│                  │  • Identifies watermarks, headers, footers as artifacts
-└────────┬─────────┘
-         │ DocumentContent (dataclass graph)
-         ▼
-┌──────────────────┐
-│   pdf_tagger     │  Stage 2 — Structure tag injection
-│                  │  • Writes PDF structure tree directly into the file
-│                  │  • Marks content streams with MCID markers
-│                  │  • Builds ParentTree, RoleMap, ClassMap
-│                  │  • Handles Link annotation tagging (MCR + OBJR)
-└────────┬─────────┘
-         │ tagged PDF
-         ▼
-┌──────────────────┐
-│ pdf_postprocess  │  Stage 3 — Metadata & font post-processing
-│                  │  • XMP metadata (pdfuaid, dc, pdf namespaces)
-│                  │  • MarkInfo, ViewerPreferences, TabOrder
-│                  │  • Font embedding (preserves original descriptor metrics)
-│                  │  • Type0 / CIDFont descendant handling
-└────────┬─────────┘
-         │ remediated PDF
-         ▼
-┌──────────────────┐
-│   validator      │  Stage 4 — veraPDF / PAC validation
-│                  │  • Runs veraPDF CLI with PDF/UA-1 profile
-│                  │  • Parses JSON report, surfaces failed clauses
-└──────────────────┘
-         │
-         ▼
-    output PDF  ✓ PDF/UA-1 compliant
+    |
+    v
++--------------------+
+|  pdf_extractor.py  |  Stage 1 - Content extraction & classification
+|                    |  - Parses text blocks, fonts, bounding boxes (pdfminer.six)
+|                    |  - Classifies headings, lists, tables, artifacts
+|                    |  - Extracts images (including nested Form XObjects)
+|                    |  - Reads existing alt text from structure tree
++--------+-----------+
+         | DocumentContent (dataclass)
+         v
++--------------------+
+|  pdf_tagger.py     |  Stage 2 - Structure tag injection
+|                    |  - Writes BDC/EMC markers into content streams
+|                    |  - Builds structure tree (Document > Art > content)
+|                    |  - Assigns MCIDs, builds ParentTree
+|                    |  - Wraps Form XObjects as single Figure elements
++--------+-----------+
+         | tagged PDF
+         v
++--------------------+
+|  pdf_postprocess.py|  Stage 3 - Metadata & compliance fixes
+|                    |  - XMP metadata (pdfuaid, dc, pdf namespaces)
+|                    |  - MarkInfo, ViewerPreferences, TabOrder
+|                    |  - Font embedding, CIDToGIDMap, CIDSet fixes
+|                    |  - Annotation accessibility, RoleMap
++--------+-----------+
+         | remediated PDF
+         v
++--------------------+
+|  validator.py      |  Stage 4 - veraPDF validation
+|                    |  - Runs veraPDF CLI with PDF/UA-1 profile
+|                    |  - Parses JSON report, surfaces failed rules
++--------------------+
+         |
+         v
+    output PDF  (PDF/UA-1 compliant)
 ```
-
----
-
-## Requirements
-
-| Dependency | Version | Purpose |
-|---|---|---|
-| Python | ≥ 3.10 | Runtime |
-| [pikepdf](https://pikepdf.readthedocs.io/) | ≥ 8 | Low-level PDF read/write |
-| [pdfminer.six](https://pdfminersix.readthedocs.io/) | ≥ 20221105 | Text extraction |
-| [Pillow](https://python-pillow.org/) | ≥ 10 | Image handling |
-| [streamlit](https://streamlit.io/) | ≥ 1.30 | Web UI (optional) |
-| [veraPDF](https://verapdf.org/software/) | ≥ 1.24 | PDF/UA-1 validation (Java) |
-
-Install Python dependencies:
-
-```bash
-pip install pikepdf pdfminer.six Pillow streamlit
-```
-
-Install veraPDF (Java required):
-
-```bash
-# macOS (Homebrew)
-brew install verapdf
-
-# Linux / manual
-# Download installer from https://verapdf.org/software/
-java -jar verapdf-installer.jar
-```
-
----
-
-## Quick Start
-
-### CLI
-
-```bash
-# Process all PDFs in the input/ directory
-python main.py
-
-# Process a single file
-python main.py --input report.pdf
-
-# Specify custom directories
-python main.py --input-dir docs/ --output-dir accessible_docs/
-
-# Skip veraPDF validation step
-python main.py --skip-validation
-
-# Enable verbose/debug logging
-python main.py --verbose
-```
-
-Output files are written as `<original_name>_accessible.pdf` in the output directory.
-
-### Web UI (Streamlit)
-
-```bash
-streamlit run app.py
-```
-
-Open `http://localhost:8501` in your browser, drag and drop PDFs, and download the remediated files.
 
 ---
 
 ## Project Structure
 
 ```
-PdfRemediationTool/
-├── main.py            # CLI entry point & pipeline orchestrator
-├── app.py             # Streamlit web UI
-├── pdf_extractor.py   # Stage 1: content extraction & classification
-├── pdf_tagger.py      # Stage 2: structure tag injection
-├── pdf_postprocess.py # Stage 3: metadata, fonts, annotations
-├── validator.py       # Stage 4: veraPDF integration
-├── models.py          # Shared dataclasses (DocumentContent, TextBlock, …)
-├── config.py          # Tunable constants (heading ratios, zone sizes, …)
-├── input/             # Drop source PDFs here (CLI mode)
-└── output/            # Remediated PDFs written here (CLI mode)
+KTR_REMIDIATION/
+|-- main.py              # CLI entry point & pipeline orchestrator
+|-- app.py               # Streamlit web UI
+|-- pdf_extractor.py     # Stage 1: content extraction & classification
+|-- pdf_tagger.py        # Stage 2: structure tag injection
+|-- pdf_postprocess.py   # Stage 3: metadata, fonts, annotations
+|-- validator.py         # Stage 4: veraPDF validation
+|-- models.py            # Shared dataclasses (DocumentContent, TextBlock, etc.)
+|-- config.py            # Tunable thresholds and constants
+|-- test_fixes.py        # Unit tests for critical accessibility fixes
+|-- requirements.txt     # Python dependencies
+|-- packages.txt         # System packages (for Streamlit Cloud deployment)
+|-- run.sh               # Convenience runner script
+|-- input/               # Place source PDFs here
+|-- output/              # Remediated PDFs written here
+`-- venv/                # Python virtual environment (not committed)
 ```
 
 ---
@@ -153,13 +166,13 @@ PdfRemediationTool/
 Edit `config.py` to tune detection thresholds:
 
 ```python
-# Heading detection — ratio of element font size to body text size
-HEADING_SIZE_RATIO_H1 = 1.8
-HEADING_SIZE_RATIO_H2 = 1.5
-HEADING_SIZE_RATIO_H3 = 1.25
-HEADING_SIZE_RATIO_H4 = 1.1
+# Heading detection (ratio of font size to body text)
+HEADING_SIZE_RATIO_H1 = 1.8    # >= 1.8x body = H1
+HEADING_SIZE_RATIO_H2 = 1.5    # >= 1.5x body = H2
+HEADING_SIZE_RATIO_H3 = 1.25   # >= 1.25x body = H3
+HEADING_SIZE_RATIO_H4 = 1.1    # >= 1.1x body = H4
 
-# Header / footer zone (fraction of page height from top/bottom)
+# Header/footer zone (fraction of page height)
 HEADER_ZONE_FRACTION = 0.08
 FOOTER_ZONE_FRACTION = 0.08
 
@@ -174,51 +187,61 @@ VERAPDF_PROFILE = "ua1"
 
 ---
 
-## Compliance Standards
+## Testing
 
-The tool targets **PDF/UA-1 (ISO 14289-1)** compliance as measured by:
+```bash
+source venv/bin/activate
 
-- **PAC** (PDF Accessibility Checker) — Swiss PDF Association checker
-- **veraPDF** — industry-standard open-source PDF/UA validator
+# Unit tests (8 tests covering critical reviewer fixes)
+python test_fixes.py
 
-Key Matterhorn Protocol checkpoints addressed:
-
-- `01-004` — Tagged PDF flag set (`MarkInfo /Marked true`)
-- `01-006` — Link elements contain both MCR and OBJR children
-- `06-001` — Document language specified (`/Lang`)
-- `07-001` — Natural language identified in metadata
-- `09-004` — `/Figure` elements have `/Alt` text
-- `14-002` — Artifacts correctly marked
-- `28-002` — XMP metadata includes `pdfuaid:part = 1`
+# Full end-to-end pipeline with validation
+python main.py --input-dir input/ --output-dir output/
+```
 
 ---
 
-## How Heading Detection Works
+## Dependencies
 
-The extractor computes a **body text size baseline** (median font size across the page) and classifies spans whose font size exceeds it by a configurable ratio:
+| Package | Version | Purpose |
+|---|---|---|
+| pikepdf | 10.3.0 | Low-level PDF structure manipulation |
+| pdfminer.six | 20260107 | Text extraction with font/position metadata |
+| Pillow | >= 10.0.0 | Image handling |
+| streamlit | 1.54.0 | Web UI |
+| langdetect | >= 1.0.9 | Document language detection |
+| fonttools | >= 4.0.0 | Font analysis and embedding |
+| veraPDF | >= 1.24 | PDF/UA-1 validation (external, Java) |
 
-| Ratio | Assigned tag |
+---
+
+## Compliance Standards
+
+Targets **PDF/UA-1 (ISO 14289-1)** as validated by [veraPDF](https://verapdf.org/).
+
+Key Matterhorn Protocol checkpoints addressed:
+
+| Checkpoint | Requirement |
 |---|---|
-| ≥ 1.8× body | `/H1` |
-| ≥ 1.5× body | `/H2` |
-| ≥ 1.25× body | `/H3` |
-| ≥ 1.1× body | `/H4` |
-| Bold at body size | `/H5` / `/H6` heuristic |
-| Otherwise | `/P` |
-
-Bold and italic font names are detected via common name suffixes (`Bold`, `Italic`, `Heavy`, `Light`, etc.).
+| 01-004 | Tagged PDF flag (`MarkInfo /Marked true`) |
+| 01-006 | Link elements contain both MCR and OBJR |
+| 06-001 | Document language specified (`/Lang`) |
+| 07-001 | No nested tagged/artifact content |
+| 09-004 | Figure elements have `/Alt` text |
+| 14-002 | Artifacts correctly marked |
+| 28-002 | XMP metadata includes `pdfuaid:part = 1` |
 
 ---
 
 ## Limitations
 
-- **Scanned PDFs** (image-only) are not supported — the pipeline requires selectable text.
-- **Right-to-left scripts** (Arabic, Hebrew) are detected and language-tagged, but reading-order reversal is not applied.
-- **Complex multi-column layouts** may produce suboptimal reading order; manual review is recommended.
-- veraPDF must be installed separately (Java runtime required).
+- **Scanned PDFs** (image-only) are not supported -- the pipeline requires selectable text
+- **Complex multi-column layouts** may produce suboptimal reading order; manual review recommended
+- **Right-to-left scripts** are language-tagged but reading-order reversal is not applied
+- veraPDF must be installed separately (requires Java runtime)
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
+MIT
