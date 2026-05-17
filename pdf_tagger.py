@@ -23,6 +23,7 @@ from typing import Optional
 import pikepdf
 
 from models import DocumentContent, PageContent, TextBlock, ImageBlock, TableBlock, ElementType
+from image_reconciliation import _read_source_struct_elements
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,13 @@ def tag_pdf(input_path: str, output_path: str, doc_content: DocumentContent) -> 
         logger.error("Could not open PDF for tagging: %s", e)
         raise
 
+    # Harvest source /Figure MCID → alt-text BEFORE we tear down the source
+    # struct tree.  Lets _insert_markers preserve diagrams that the source
+    # wrapped as one /Figure (typical for InDesign flowcharts/maps drawn as
+    # raw paths intermixed with text labels) — without this, the vector
+    # detector fragments them into N pieces and drops the source alt.
+    source_figure_alts = _build_source_figure_alt_map(pdf)
+
     _remove_existing_structure(pdf)
 
     all_page_elems = []
@@ -46,8 +54,12 @@ def tag_pdf(input_path: str, output_path: str, doc_content: DocumentContent) -> 
         page_content = (doc_content.pages[page_idx]
                         if page_idx < len(doc_content.pages) else None)
         mcid_counter = [0]  # Reset per page — ParentTree is indexed by MCID per page
+        page_source_figure_alts = source_figure_alts.get(page_idx, {})
         try:
-            page_elems = _tag_page(pdf, page, page_content, page_idx, mcid_counter)
+            page_elems = _tag_page(
+                pdf, page, page_content, page_idx, mcid_counter,
+                source_figure_alts=page_source_figure_alts,
+            )
         except Exception as e:
             logger.warning("Page %d tagging failed (%s), wrapping as artifact", page_idx, e)
             mcid_counter = [0]
@@ -105,6 +117,36 @@ def _get_xobjects(page) -> Optional[pikepdf.Dictionary]:
 
 
 # ---------------------------------------------------------------------------
+# Source struct-tree harvesting
+# ---------------------------------------------------------------------------
+
+def _build_source_figure_alt_map(pdf: pikepdf.Pdf) -> dict:
+    """Build {page_idx: {source_mcid: alt_text}} from the source struct tree.
+
+    Used by _insert_markers to recognise source /Figure BDC ranges and tag
+    them with the original alt instead of letting the vector detector split
+    them.  Returns {} when there is no struct tree.
+    """
+    out: dict = {}
+    try:
+        elements_by_page = _read_source_struct_elements(pdf)
+    except Exception:
+        return out
+    for page_idx, elems in elements_by_page.items():
+        page_map: dict = {}
+        for elem in elems:
+            if elem.struct_type != "/Figure":
+                continue
+            if not elem.alt_text:
+                continue
+            for mcid in elem.mcids:
+                page_map.setdefault(mcid, elem.alt_text)
+        if page_map:
+            out[page_idx] = page_map
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Structure tree removal
 # ---------------------------------------------------------------------------
 
@@ -122,7 +164,8 @@ def _remove_existing_structure(pdf: pikepdf.Pdf):
 # ---------------------------------------------------------------------------
 
 def _tag_page(pdf, page, page_content: Optional[PageContent],
-              page_idx: int, mcid_counter: list) -> list:
+              page_idx: int, mcid_counter: list,
+              source_figure_alts: Optional[dict] = None) -> list:
     """Tag a single page's content stream with structure markers."""
     blocks = _build_block_index(page_content)
 
@@ -132,7 +175,9 @@ def _tag_page(pdf, page, page_content: Optional[PageContent],
         # Can't parse → wrap entire page as artifact
         return _tag_page_fallback(pdf, page, page_idx, mcid_counter)
 
-    ops, source_artifact_mask = _strip_markers_with_artifact_mask(raw_ops)
+    ops, source_artifact_mask, source_figure_regions = (
+        _strip_markers_with_source_intent(raw_ops, source_figure_alts or {})
+    )
 
     watermark_forms = _detect_watermark_forms(page)
     link_annots = _collect_link_annots(page)
@@ -140,6 +185,7 @@ def _tag_page(pdf, page, page_content: Optional[PageContent],
     new_ops, struct_elems = _insert_markers(
         ops, blocks, page, watermark_forms, mcid_counter, link_annots, pdf=pdf,
         source_artifact_mask=source_artifact_mask,
+        source_figure_regions=source_figure_regions,
     )
 
     new_stream_data = pikepdf.unparse_content_stream(new_ops)
@@ -234,36 +280,85 @@ def _strip_markers(ops: list) -> list:
     ]
 
 
-def _strip_markers_with_artifact_mask(raw_ops: list) -> tuple:
-    """Strip BDC/BMC/EMC like `_strip_markers`, but also return a bool list
-    `mask` where `mask[i]` is True if the i-th surviving op was originally
-    nested inside a `/Artifact` BDC (or BMC) ... EMC range in the source.
+def _strip_markers_with_source_intent(raw_ops: list,
+                                       source_figure_alts: dict) -> tuple:
+    """Strip BDC/BMC/EMC and report the source's structural intent.
 
-    Used by the vector-figure detector to skip regions the source author
-    already classified as decorative (page-template chrome, watermarks
-    drawn as paths, etc.) so we don't promote them to /Figure.
+    Returns:
+        (out_ops, artifact_mask, source_figure_regions)
+
+    - ``out_ops`` is the op list with all marked-content operators removed.
+    - ``artifact_mask[i]`` is True when ``out_ops[i]`` was originally nested
+      inside a ``/Artifact`` BDC/BMC ... EMC range — used by the vector
+      detector to skip page-template chrome the author already marked
+      decorative.
+    - ``source_figure_regions`` is a list of ``(start_idx, end_idx, alt_text)``
+      tuples giving the post-strip op-index range of every ``/Figure`` BDC
+      whose MCID is present in ``source_figure_alts`` (keyed by source MCID).
+      The caller wraps each range as a single ``/Figure`` to keep diagrams
+      that mix paths and text labels (flowcharts, maps) intact instead of
+      letting the path-region detector fragment them.
     """
     out_ops: list = []
     mask: list = []
-    artifact_depth = 0  # nesting count of /Artifact markers we are currently inside
-    bdc_stack: list = []  # stack of bools — True if the open BDC/BMC was /Artifact
+    artifact_depth = 0
+    # bdc_stack frames: ('artifact', None) | ('figure', mcid_or_None) | ('other', None)
+    bdc_stack: list = []
+    # Track the deepest source /Figure we're inside, plus its start in out_ops.
+    figure_open_stack: list = []  # list of (out_start_idx, alt_text)
+    source_figure_regions: list = []
     for operands, op in raw_ops:
         s = str(op)
         if s in ("BDC", "BMC"):
-            is_artifact = bool(operands) and str(operands[0]) == "/Artifact"
-            bdc_stack.append(is_artifact)
-            if is_artifact:
+            tag = str(operands[0]) if operands else ""
+            if tag == "/Artifact":
+                bdc_stack.append(("artifact", None))
                 artifact_depth += 1
+            elif tag == "/Figure":
+                # Pull the MCID out of the BDC properties dict so we can
+                # cross-reference against source_figure_alts.  BMC has no
+                # properties dict; treat as untracked.
+                mcid = None
+                if s == "BDC" and len(operands) >= 2:
+                    try:
+                        props = operands[1]
+                        if hasattr(props, "get"):
+                            raw_mcid = props.get("/MCID")
+                            if raw_mcid is not None:
+                                mcid = int(raw_mcid)
+                    except Exception:
+                        mcid = None
+                alt = source_figure_alts.get(mcid) if mcid is not None else None
+                if alt:
+                    figure_open_stack.append((len(out_ops), alt))
+                    bdc_stack.append(("figure", mcid))
+                else:
+                    bdc_stack.append(("other", None))
+            else:
+                bdc_stack.append(("other", None))
             continue
         if s == "EMC":
             if bdc_stack:
-                was_artifact = bdc_stack.pop()
-                if was_artifact and artifact_depth > 0:
+                kind, _ = bdc_stack.pop()
+                if kind == "artifact" and artifact_depth > 0:
                     artifact_depth -= 1
+                elif kind == "figure" and figure_open_stack:
+                    start_idx, alt = figure_open_stack.pop()
+                    end_idx = len(out_ops) - 1
+                    if end_idx >= start_idx:
+                        source_figure_regions.append((start_idx, end_idx, alt))
             continue
         out_ops.append((operands, op))
         mask.append(artifact_depth > 0)
-    return out_ops, mask
+    return out_ops, mask, source_figure_regions
+
+
+def _strip_markers_with_artifact_mask(raw_ops: list) -> tuple:
+    """Back-compat shim — returns just (ops, artifact_mask). New callers
+    should use _strip_markers_with_source_intent directly.
+    """
+    ops, mask, _ = _strip_markers_with_source_intent(raw_ops, {})
+    return ops, mask
 
 
 # Operator categories used by the vector-figure detector below.
@@ -357,6 +452,29 @@ def _detect_vector_figure_regions(
     if cur_end >= 0:
         merged.append((cur_start, cur_end))
 
+    return merged
+
+
+def _merge_figure_regions(source_regions: list, auto_regions: list) -> list:
+    """Combine source ``/Figure`` BDC ranges with auto-detected vector
+    regions, returning a sorted, non-overlapping list of
+    ``(start, end, alt_or_None)`` tuples.
+
+    Source ranges are authoritative: any auto-detected region that
+    overlaps a source range is dropped (the source range already covers
+    the diagram and carries the correct alt).
+    """
+    merged: list = []
+    for s, e, alt in source_regions:
+        if e < s:
+            continue
+        merged.append((s, e, alt))
+    for s, e in auto_regions:
+        overlaps = any(not (e < sr_s or s > sr_e) for sr_s, sr_e, _ in merged)
+        if overlaps:
+            continue
+        merged.append((s, e, None))
+    merged.sort(key=lambda t: t[0])
     return merged
 
 
@@ -494,13 +612,21 @@ def _clean_form_xobject_markers(pdf: pikepdf.Pdf, page, xobj_name: str):
 
 
 def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
-                    link_annots=None, pdf=None, source_artifact_mask=None):
+                    link_annots=None, pdf=None, source_artifact_mask=None,
+                    source_figure_regions=None):
     """Walk through content stream ops, inserting BDC/EMC structure markers.
 
     Uses an "artifact-as-default" strategy so nothing is ever untagged.
     When link_annots is provided, text falling within a link annotation's
     rect is tagged as /Link with both MCR and annotation reference.
     pdf is required for cleaning Form XObject content streams.
+
+    ``source_figure_regions`` is an optional list of
+    ``(start_idx, end_idx, alt_text)`` ranges harvested from the source
+    PDF's ``/Figure`` BDC markers.  Each range is wrapped as a single
+    ``/Figure`` so diagrams the source author had already grouped (e.g.
+    InDesign flowcharts mixing paths and text labels) stay intact instead
+    of being fragmented by the vector-region detector.
     """
     if link_annots is None:
         link_annots = []
@@ -538,21 +664,28 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
     # the matching `Q`, then emits EMC.  This is what tags raw vector
     # graph content (line graphs, bar charts, pie charts) as figures
     # instead of decorative artifacts.
-    figure_regions = _detect_vector_figure_regions(ops)
+    auto_regions = _detect_vector_figure_regions(ops)
     # Filter out regions whose content was tagged /Artifact in the source —
     # respects authorial intent for decorative page-template chrome that
     # happens to be drawn with many path operators (InDesign cover flourish,
     # watermarks, etc.).  Only applies when we received a source mask.
-    if source_artifact_mask is not None and figure_regions:
-        figure_regions = [
-            (s, e) for (s, e) in figure_regions
+    if source_artifact_mask is not None and auto_regions:
+        auto_regions = [
+            (s, e) for (s, e) in auto_regions
             if not _region_is_source_artifact(s, e, source_artifact_mask)
         ]
+    # Source /Figure BDC ranges are authoritative — they preserve the
+    # author's intended grouping (one diagram = one Figure with its alt).
+    # Drop any auto-detected region that overlaps a source range so the
+    # diagram isn't double-wrapped or fragmented.
+    src_ranges = list(source_figure_regions or [])
+    figure_regions = _merge_figure_regions(src_ranges, auto_regions)
     next_figure_idx = 0  # pointer into figure_regions; avoids a start→end dict
     in_figure_region = False
     figure_region_end_idx = -1
     figure_region_mcid = -1
     figure_region_bbox = None  # accumulated min/max in page coords
+    figure_region_source_alt = None  # alt from source /Figure, if any
 
     def _open_artifact():
         nonlocal artifact_open
@@ -732,17 +865,22 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
             _close_artifact()
             figure_mcid = mcid_counter[0]
             mcid_counter[0] += 1
-            # If a source vector-figure block carries an alt text (set by
-            # image_reconciliation from a source /Figure with /Alt that has
-            # no matching Image Do), consume it here so hand-written alts on
-            # charts survive into the output.  Otherwise fall back to
-            # the generic "Figure" placeholder.
-            vec_idx = _find_vector_figure_block(blocks)
-            if vec_idx is not None and blocks[vec_idx].get("alt_text"):
-                blocks[vec_idx]["used"] = True
-                figure_region_alt = blocks[vec_idx]["alt_text"]
+            # Alt-text resolution priority:
+            #   1. Source /Figure BDC range carries the author's own alt — use it.
+            #   2. Otherwise, consume an unused vector-figure block carrying an
+            #      alt forwarded by image_reconciliation (source /Figure with
+            #      /Alt that has no matching Image Do).
+            #   3. Otherwise fall back to the generic "Figure" placeholder.
+            figure_region_source_alt = figure_regions[next_figure_idx][2]
+            if figure_region_source_alt:
+                figure_region_alt = figure_region_source_alt
             else:
-                figure_region_alt = "Figure"
+                vec_idx = _find_vector_figure_block(blocks)
+                if vec_idx is not None and blocks[vec_idx].get("alt_text"):
+                    blocks[vec_idx]["used"] = True
+                    figure_region_alt = blocks[vec_idx]["alt_text"]
+                else:
+                    figure_region_alt = "Figure"
             new_ops.append((
                 [pikepdf.Name("/Figure"),
                  pikepdf.Dictionary({"/MCID": figure_mcid})],
