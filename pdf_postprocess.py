@@ -44,6 +44,8 @@ def postprocess_pdf(pdf_path: str, title: str, language: str,
     _fix_cidset_streams(pdf)
     _fix_annotations(pdf)
     _cleanup_empty_markers(pdf)
+    _sanitize_non_standard_struct_types(pdf)
+    _check_pipeline_invariants(pdf)
 
     # PDF/UA-1 requires PDF 1.7+
     pdf.save(pdf_path, min_version="1.7")
@@ -121,7 +123,11 @@ _STANDARD_STRUCT_TYPES = frozenset([
     "/Span", "/Quote", "/Note", "/Reference", "/BibEntry", "/Code",
     "/Link", "/Annot", "/Ruby", "/Warichu", "/RB", "/RT", "/RP", "/WT", "/WP",
     "/Figure", "/Formula", "/Form",
-    "/Artifact",
+    # Note: /Artifact is intentionally NOT here — it is a marked-content
+    # operator (BDC /Artifact ... EMC), not a structure type.  PAC flags any
+    # /S /Artifact struct element as non-standard.  Leaving it out ensures a
+    # source RoleMap entry like /Artifact -> /Foo would be preserved rather
+    # than silently removed.
 ])
 
 
@@ -154,6 +160,200 @@ def _ensure_role_map(pdf: pikepdf.Pdf):
     # Remove empty RoleMap
     if len(role_map.keys()) == 0:
         del stroot[pikepdf.Name("/RoleMap")]
+
+
+# ---------------------------------------------------------------------------
+# Struct-type sanitizer (Robustness pass A)
+# ---------------------------------------------------------------------------
+
+# Common non-standard /S aliases produced by Word/InDesign/Acrobat that map
+# cleanly to a PDF/UA-1 standard structure type. Adding entries here teaches
+# the sanitizer to insert a RoleMap rule automatically rather than letting
+# PAC fail with "non-standard structure type".
+_STRUCT_TYPE_ALIASES = {
+    "/Diagram":         "/Figure",
+    "/Chart":           "/Figure",
+    "/Drawing":         "/Figure",
+    "/InlineShape":     "/Figure",
+    "/Picture":         "/Figure",
+    "/Image":           "/Figure",
+    "/Title":           "/H1",
+    "/Subtitle":        "/H2",
+    "/StyleSpan":       "/Span",
+    "/ParagraphSpan":   "/Span",
+    "/CharacterSpan":   "/Span",
+    "/Hyperlink":       "/Link",
+    # /Footnote, /Note, /Reference, /BibEntry are already standard — see
+    # _STANDARD_STRUCT_TYPES above.
+}
+
+
+def _walk_struct_elements(node, seen=None):
+    """Depth-first generator over every struct element in the tree."""
+    if seen is None:
+        seen = set()
+    if not isinstance(node, pikepdf.Dictionary):
+        return
+    try:
+        key = node.objgen
+    except Exception:
+        key = id(node)
+    if key in seen:
+        return
+    seen.add(key)
+    yield node
+    try:
+        kids = node.get("/K")
+    except Exception:
+        return
+    if kids is None:
+        return
+    if isinstance(kids, pikepdf.Array):
+        for c in kids:
+            if isinstance(c, pikepdf.Dictionary):
+                yield from _walk_struct_elements(c, seen)
+    elif isinstance(kids, pikepdf.Dictionary):
+        yield from _walk_struct_elements(kids, seen)
+
+
+def _sanitize_non_standard_struct_types(pdf: pikepdf.Pdf):
+    """Ensure every output struct element has a PDF/UA-resolvable /S.
+
+    Walks the struct tree, collects the set of distinct /S values, and for
+    any non-standard value that isn't already mapped in /RoleMap:
+      * Known alias (Word/InDesign): insert RoleMap entry -> standard type.
+      * /Artifact: log loudly. Artifact is a marked-content operator, never
+        a struct type — its presence in the tree is a code bug, not data
+        the user introduced. We do not auto-rewrite here (would require
+        rewriting the content stream and ParentTree); the matching pipeline
+        invariant raises so the regression is caught immediately.
+      * Anything else: insert a defensive /Span mapping and warn so the
+        tag still resolves to a known structure type for screen readers.
+
+    This is a pure safety-net pass: if the tagger is healthy, the function
+    walks the tree, finds nothing to fix, and returns.
+    """
+    stroot = pdf.Root.get("/StructTreeRoot")
+    if not stroot:
+        return
+
+    types_in_tree: set = set()
+    for node in _walk_struct_elements(stroot):
+        try:
+            s = node.get("/S")
+        except Exception:
+            continue
+        if s is None:
+            continue
+        types_in_tree.add(str(s))
+
+    non_standard = types_in_tree - _STANDARD_STRUCT_TYPES
+    if not non_standard:
+        return
+
+    role_map = stroot.get("/RoleMap")
+    if role_map is None:
+        role_map = pikepdf.Dictionary()
+        stroot[pikepdf.Name("/RoleMap")] = role_map
+
+    for s_type in sorted(non_standard):
+        # Already mapped by source or a prior run — leave alone.
+        try:
+            if role_map.get(s_type) is not None:
+                continue
+        except Exception:
+            pass
+
+        if s_type == "/Artifact":
+            # Loud log — the invariant check below will fail the run so we
+            # catch the regression immediately rather than shipping a bad
+            # file.  No RoleMap entry: /Artifact has no valid struct meaning.
+            logger.error(
+                "Output struct tree contains /S /Artifact — this is never "
+                "valid (Artifact is a marked-content operator, not a struct "
+                "type).  Investigate the tagger; not auto-fixing here."
+            )
+            continue
+
+        mapped = _STRUCT_TYPE_ALIASES.get(s_type, "/Span")
+        role_map[pikepdf.Name(s_type)] = pikepdf.Name(mapped)
+        logger.warning(
+            "Added defensive RoleMap entry: %s -> %s (non-standard struct "
+            "type encountered in output)",
+            s_type, mapped,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Pre-save pipeline invariants (Robustness pass B)
+# ---------------------------------------------------------------------------
+
+class PipelineInvariantError(RuntimeError):
+    """Raised when the final PDF violates an invariant we promised to uphold."""
+
+
+def _check_pipeline_invariants(pdf: pikepdf.Pdf):
+    """Last-line sanity check before save.
+
+    These invariants are things the rest of the pipeline already guarantees
+    — but a code regression elsewhere could quietly break them.  Surfacing
+    the violation here turns silent bad output into a loud error during
+    development/CI, while staying a no-op when the pipeline is healthy.
+
+    Invariants:
+      INV-1  No struct element has /S /Artifact.  Artifact is a marked-
+             content operator and ends up flagged by PAC as a non-standard
+             structure type with nothing visible to fix.
+      INV-2  Every /S in the tree is either standard PDF/UA or appears in
+             /RoleMap (the sanitizer pass above should have closed any gap).
+
+    Violations raise PipelineInvariantError — the failure stops the pipeline
+    before writing a known-bad output PDF.
+    """
+    stroot = pdf.Root.get("/StructTreeRoot")
+    if not stroot:
+        return
+
+    role_map_keys: set = set()
+    try:
+        rm = stroot.get("/RoleMap")
+        if rm is not None:
+            role_map_keys = {str(k) for k in rm.keys()}
+    except Exception:
+        pass
+
+    bad_artifact = 0
+    unresolved: set = set()
+    for node in _walk_struct_elements(stroot):
+        try:
+            s = node.get("/S")
+        except Exception:
+            continue
+        if s is None:
+            continue
+        s_str = str(s)
+        if s_str == "/Artifact":
+            bad_artifact += 1
+            continue
+        if s_str not in _STANDARD_STRUCT_TYPES and s_str not in role_map_keys:
+            unresolved.add(s_str)
+
+    problems = []
+    if bad_artifact:
+        problems.append(
+            f"INV-1 violated: {bad_artifact} struct element(s) have "
+            f"/S /Artifact (must be marked-content, not a struct type)"
+        )
+    if unresolved:
+        problems.append(
+            f"INV-2 violated: non-standard struct type(s) without RoleMap: "
+            f"{sorted(unresolved)}"
+        )
+
+    if problems:
+        msg = "Pipeline invariant check failed:\n  - " + "\n  - ".join(problems)
+        logger.error(msg)
+        raise PipelineInvariantError(msg)
 
 
 def _fix_optional_content(pdf: pikepdf.Pdf):
