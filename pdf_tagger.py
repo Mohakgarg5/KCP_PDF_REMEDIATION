@@ -1488,6 +1488,14 @@ def _build_structure_tree(pdf: pikepdf.Pdf, all_page_elems: list,
                 "/MCID": mcid,
             })
 
+            # Defensive: /Artifact is a marked-content role, never a valid
+            # /S value.  If it ever reaches this point a producer upstream is
+            # broken — fail loudly here rather than emit a malformed PDF that
+            # only PAC will catch later.
+            assert struct_type != "/Artifact", (
+                f"Refusing to emit StructElem with /S=/Artifact "
+                f"(mcid={mcid}, page={page_idx}); fix the producer"
+            )
             elem_dict = {
                 "/Type": pikepdf.Name("/StructElem"),
                 "/S": pikepdf.Name(struct_type),
@@ -1514,15 +1522,27 @@ def _build_structure_tree(pdf: pikepdf.Pdf, all_page_elems: list,
                     "/Scope": pikepdf.Name("/Column"),
                 })
 
-            if struct_type == "/Figure" and fig_bbox:
-                elem_dict["/A"] = pikepdf.Dictionary({
-                    "/O": pikepdf.Name("/Layout"),
-                    "/BBox": pikepdf.Array([
-                        fig_bbox[0], fig_bbox[1],
-                        fig_bbox[2], fig_bbox[3],
-                    ]),
-                    "/Placement": pikepdf.Name("/Block"),
-                })
+            if struct_type == "/Figure":
+                # PDF/UA-1: every /Figure on a single page must carry /BBox.
+                # Fall back to the page MediaBox so the /A dict is always
+                # present — better a coarse BBox than none at all.
+                bbox = fig_bbox
+                if not bbox:
+                    try:
+                        mb = pdf.pages[page_idx].obj.get("/MediaBox")
+                        if mb is not None and len(mb) >= 4:
+                            bbox = [float(mb[0]), float(mb[1]),
+                                    float(mb[2]), float(mb[3])]
+                    except Exception:
+                        bbox = None
+                if bbox:
+                    elem_dict["/A"] = pikepdf.Dictionary({
+                        "/O": pikepdf.Name("/Layout"),
+                        "/BBox": pikepdf.Array([
+                            bbox[0], bbox[1], bbox[2], bbox[3],
+                        ]),
+                        "/Placement": pikepdf.Name("/Block"),
+                    })
 
             elem = pdf.make_indirect(pikepdf.Dictionary(elem_dict))
             mcid_to_elem[mcid] = elem
@@ -1776,8 +1796,16 @@ def _group_and_add_children(pdf: pikepdf.Pdf, doc_elem, doc_kids,
 # Element type mapping
 # ---------------------------------------------------------------------------
 
-def _element_to_struct_type(tb: TextBlock) -> str:
-    """Map a TextBlock's ElementType to a PDF structure tag name."""
+def _element_to_struct_type(tb: TextBlock) -> Optional[str]:
+    """Map a TextBlock's ElementType to a PDF structure tag name.
+
+    Returns ``None`` for element types that must NOT receive a StructElem
+    (WATERMARK, HEADER_FOOTER) — those are routed through the content-stream
+    /Artifact BDC path in ``_open_struct_for_block`` instead.  ``/Artifact``
+    is a marked-content role, never a valid /S value; returning it here was a
+    contract bug that the downstream ``is_artifact`` flag intercepted, but the
+    cleaner contract is to never produce it in the first place.
+    """
     if tb.element_type == ElementType.HEADING:
         level = max(1, min(tb.heading_level or 1, 6))
         return f"/H{level}"
@@ -1787,10 +1815,8 @@ def _element_to_struct_type(tb: TextBlock) -> str:
         return "/TD"
     elif tb.element_type == ElementType.TABLE_HEADER:
         return "/TH"
-    elif tb.element_type == ElementType.WATERMARK:
-        return "/Artifact"
-    elif tb.element_type == ElementType.HEADER_FOOTER:
-        return "/Artifact"
+    elif tb.element_type in (ElementType.WATERMARK, ElementType.HEADER_FOOTER):
+        return None
     else:
         return "/P"
 
