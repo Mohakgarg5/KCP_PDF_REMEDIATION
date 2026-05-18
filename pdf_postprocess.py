@@ -306,6 +306,11 @@ def _check_pipeline_invariants(pdf: pikepdf.Pdf):
              structure type with nothing visible to fix.
       INV-2  Every /S in the tree is either standard PDF/UA or appears in
              /RoleMap (the sanitizer pass above should have closed any gap).
+      INV-3  Every /Figure struct element carries /BBox (directly or in /A).
+             PDF/UA-1 requires /BBox on every page-local Figure so AT can
+             locate/crop it.
+      INV-4  Every MCID present in a page content stream is reachable from
+             the struct tree (no orphan tagged content).
 
     Violations raise PipelineInvariantError — the failure stops the pipeline
     before writing a known-bad output PDF.
@@ -324,6 +329,8 @@ def _check_pipeline_invariants(pdf: pikepdf.Pdf):
 
     bad_artifact = 0
     unresolved: set = set()
+    figures_missing_bbox = 0
+    reachable_mcids: dict = {}  # page-objgen -> set of MCIDs
     for node in _walk_struct_elements(stroot):
         try:
             s = node.get("/S")
@@ -337,6 +344,23 @@ def _check_pipeline_invariants(pdf: pikepdf.Pdf):
             continue
         if s_str not in _STANDARD_STRUCT_TYPES and s_str not in role_map_keys:
             unresolved.add(s_str)
+        # INV-3: every /Figure must carry /BBox
+        if s_str == "/Figure":
+            if not _figure_has_bbox(node):
+                figures_missing_bbox += 1
+        # INV-4: collect reachable MCIDs (only for leaf /K = MCR/int)
+        _collect_reachable_mcids(node, reachable_mcids)
+
+    # INV-4: compare reachable vs actual content-stream MCIDs
+    orphans_total = 0
+    orphan_pages = []
+    for page_idx, page in enumerate(pdf.pages):
+        actual = _collect_page_mcids(page)
+        reach = reachable_mcids.get(page.objgen, set())
+        orphans = actual - reach
+        if orphans:
+            orphans_total += len(orphans)
+            orphan_pages.append((page_idx + 1, sorted(orphans)[:5]))
 
     problems = []
     if bad_artifact:
@@ -349,11 +373,95 @@ def _check_pipeline_invariants(pdf: pikepdf.Pdf):
             f"INV-2 violated: non-standard struct type(s) without RoleMap: "
             f"{sorted(unresolved)}"
         )
+    if figures_missing_bbox:
+        problems.append(
+            f"INV-3 violated: {figures_missing_bbox} /Figure element(s) "
+            f"missing /BBox (PDF/UA-1 requires /BBox on page-local Figures)"
+        )
+    if orphans_total:
+        sample = ", ".join(
+            f"page {p}: MCIDs {ms}" for p, ms in orphan_pages[:3]
+        )
+        problems.append(
+            f"INV-4 violated: {orphans_total} orphan MCID(s) in content "
+            f"streams not reachable from struct tree (sample: {sample})"
+        )
 
     if problems:
         msg = "Pipeline invariant check failed:\n  - " + "\n  - ".join(problems)
         logger.error(msg)
         raise PipelineInvariantError(msg)
+
+
+def _figure_has_bbox(node) -> bool:
+    """True if a /Figure StructElem has /BBox available (direct or in /A)."""
+    try:
+        if "/BBox" in node:
+            return True
+        a = node.get("/A")
+    except Exception:
+        return False
+    if a is None:
+        return False
+    if isinstance(a, pikepdf.Dictionary):
+        return "/BBox" in a
+    if isinstance(a, pikepdf.Array):
+        for entry in a:
+            if isinstance(entry, pikepdf.Dictionary) and "/BBox" in entry:
+                return True
+    return False
+
+
+def _collect_reachable_mcids(node, out: dict) -> None:
+    """Walk a StructElem's /K and record every (page, MCID) reached."""
+    try:
+        k = node.get("/K")
+    except Exception:
+        return
+    if k is None:
+        return
+    items = k if isinstance(k, pikepdf.Array) else [k]
+    for item in items:
+        if isinstance(item, int):
+            # Bare int MCID on this StructElem's page (when /Pg is on the elem)
+            try:
+                pg = node.get("/Pg")
+            except Exception:
+                pg = None
+            if pg is not None:
+                out.setdefault(pg.objgen, set()).add(int(item))
+            continue
+        if isinstance(item, pikepdf.Dictionary):
+            t = item.get("/Type")
+            t_str = str(t) if t is not None else ""
+            if t_str == "/MCR":
+                mcid = item.get("/MCID")
+                pg = item.get("/Pg") or node.get("/Pg")
+                if mcid is not None and pg is not None:
+                    out.setdefault(pg.objgen, set()).add(int(mcid))
+
+
+_MCID_RE = None
+
+def _collect_page_mcids(page) -> set:
+    """Parse a page's content stream(s) and return the set of MCIDs present."""
+    import re
+    global _MCID_RE
+    if _MCID_RE is None:
+        _MCID_RE = re.compile(rb"/MCID\s+(\d+)")
+    cs = page.get("/Contents")
+    if cs is None:
+        return set()
+    streams = cs if isinstance(cs, pikepdf.Array) else [cs]
+    mcids: set = set()
+    for s in streams:
+        try:
+            data = s.read_bytes()
+        except Exception:
+            continue
+        for m in _MCID_RE.finditer(data):
+            mcids.add(int(m.group(1)))
+    return mcids
 
 
 def _fix_optional_content(pdf: pikepdf.Pdf):
