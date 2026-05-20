@@ -121,26 +121,34 @@ def _get_xobjects(page) -> Optional[pikepdf.Dictionary]:
 # ---------------------------------------------------------------------------
 
 def _build_source_figure_alt_map(pdf: pikepdf.Pdf) -> dict:
-    """Build {page_idx: {source_mcid: alt_text}} from the source struct tree.
+    """Build {page_idx: {source_mcid: (figure_id, alt_text)}} from the source struct tree.
 
-    Used by _insert_markers to recognise source /Figure BDC ranges and tag
-    them with the original alt instead of letting the vector detector split
-    them.  Returns {} when there is no struct tree.
+    The ``figure_id`` is a stable per-source-/Figure identifier — every MCID
+    that belongs to the same source ``/Figure`` StructElem shares one id.
+    ``_insert_markers`` uses it to group multiple BDC ranges of a single
+    source diagram into ONE output ``/Figure`` StructElem (instead of
+    fragmenting them into one StructElem per BDC range, which produces the
+    "overlapping empty figures, repeated alt text" pattern that screen
+    readers announce N times).
+
+    Figures with no /Alt are still tracked — grouping is needed regardless,
+    and the alt-resolution fallback in ``_insert_markers`` fills in a value.
     """
     out: dict = {}
     try:
         elements_by_page = _read_source_struct_elements(pdf)
     except Exception:
         return out
+    fig_id_counter = [0]
     for page_idx, elems in elements_by_page.items():
         page_map: dict = {}
         for elem in elems:
             if elem.struct_type != "/Figure":
                 continue
-            if not elem.alt_text:
-                continue
+            fid = fig_id_counter[0]
+            fig_id_counter[0] += 1
             for mcid in elem.mcids:
-                page_map.setdefault(mcid, elem.alt_text)
+                page_map.setdefault(mcid, (fid, elem.alt_text or ""))
         if page_map:
             out[page_idx] = page_map
     return out
@@ -304,9 +312,9 @@ def _strip_markers_with_source_intent(raw_ops: list,
     artifact_depth = 0
     # bdc_stack frames: ('artifact', None) | ('figure', mcid_or_None) | ('other', None)
     bdc_stack: list = []
-    # Track the deepest source /Figure we're inside, plus its start in out_ops.
-    figure_open_stack: list = []  # list of (out_start_idx, alt_text)
-    source_figure_regions: list = []
+    # Track the deepest source /Figure we're inside: (out_start_idx, alt, figure_id).
+    figure_open_stack: list = []
+    source_figure_regions: list = []  # (start, end, alt, figure_id)
     for operands, op in raw_ops:
         s = str(op)
         if s in ("BDC", "BMC"):
@@ -328,9 +336,11 @@ def _strip_markers_with_source_intent(raw_ops: list,
                                 mcid = int(raw_mcid)
                     except Exception:
                         mcid = None
-                alt = source_figure_alts.get(mcid) if mcid is not None else None
-                if alt:
-                    figure_open_stack.append((len(out_ops), alt))
+                entry = (source_figure_alts.get(mcid)
+                         if mcid is not None else None)
+                if entry is not None:
+                    fid, alt = entry
+                    figure_open_stack.append((len(out_ops), alt, fid))
                     bdc_stack.append(("figure", mcid))
                 else:
                     bdc_stack.append(("other", None))
@@ -343,10 +353,12 @@ def _strip_markers_with_source_intent(raw_ops: list,
                 if kind == "artifact" and artifact_depth > 0:
                     artifact_depth -= 1
                 elif kind == "figure" and figure_open_stack:
-                    start_idx, alt = figure_open_stack.pop()
+                    start_idx, alt, fid = figure_open_stack.pop()
                     end_idx = len(out_ops) - 1
                     if end_idx >= start_idx:
-                        source_figure_regions.append((start_idx, end_idx, alt))
+                        source_figure_regions.append(
+                            (start_idx, end_idx, alt, fid)
+                        )
             continue
         out_ops.append((operands, op))
         mask.append(artifact_depth > 0)
@@ -458,22 +470,26 @@ def _detect_vector_figure_regions(
 def _merge_figure_regions(source_regions: list, auto_regions: list) -> list:
     """Combine source ``/Figure`` BDC ranges with auto-detected vector
     regions, returning a sorted, non-overlapping list of
-    ``(start, end, alt_or_None)`` tuples.
+    ``(start, end, alt_or_None, figure_id_or_None)`` tuples.
 
     Source ranges are authoritative: any auto-detected region that
     overlaps a source range is dropped (the source range already covers
-    the diagram and carries the correct alt).
+    the diagram and carries the correct alt).  ``figure_id`` is the
+    source-/Figure StructElem identity for source regions and ``None``
+    for auto-detected regions.
     """
     merged: list = []
-    for s, e, alt in source_regions:
+    for s, e, alt, fid in source_regions:
         if e < s:
             continue
-        merged.append((s, e, alt))
+        merged.append((s, e, alt, fid))
     for s, e in auto_regions:
-        overlaps = any(not (e < sr_s or s > sr_e) for sr_s, sr_e, _ in merged)
+        overlaps = any(
+            not (e < sr_s or s > sr_e) for sr_s, sr_e, _, _ in merged
+        )
         if overlaps:
             continue
-        merged.append((s, e, None))
+        merged.append((s, e, None, None))
     merged.sort(key=lambda t: t[0])
     return merged
 
@@ -686,6 +702,7 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
     figure_region_mcid = -1
     figure_region_bbox = None  # accumulated min/max in page coords
     figure_region_source_alt = None  # alt from source /Figure, if any
+    figure_region_source_id = None   # source-/Figure id for grouping, or None
 
     def _open_artifact():
         nonlocal artifact_open
@@ -872,6 +889,7 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
             #      /Alt that has no matching Image Do).
             #   3. Otherwise fall back to the generic "Figure" placeholder.
             figure_region_source_alt = figure_regions[next_figure_idx][2]
+            figure_region_source_id = figure_regions[next_figure_idx][3]
             if figure_region_source_alt:
                 figure_region_alt = figure_region_source_alt
             else:
@@ -943,18 +961,23 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
             new_ops.append((operands, operator))
 
             if idx == figure_region_end_idx:
-                # Close the /Figure region
+                # Close the /Figure region.  The 5th element is the source-
+                # /Figure id (None for auto-detected regions); when set, the
+                # struct-tree builder groups every BDC range sharing this id
+                # under ONE output /Figure StructElem with multiple /MCRs.
                 new_ops.append(([], pikepdf.Operator("EMC")))
                 struct_elems.append((
                     figure_region_mcid,
                     "/Figure",
                     figure_region_alt,
                     figure_region_bbox,
+                    figure_region_source_id,
                 ))
                 in_figure_region = False
                 figure_region_end_idx = -1
                 figure_region_mcid = -1
                 figure_region_bbox = None
+                figure_region_source_id = None
                 _open_artifact()
             continue
 
@@ -1460,10 +1483,14 @@ def _build_structure_tree(pdf: pikepdf.Pdf, all_page_elems: list,
         page_elem_refs = []
         mcid_to_elem = {}     # mcid -> struct elem, for continuation lookup
         pending_conts = []    # (cont_mcid, original_mcid) processed after main pass
+        # source-/Figure id -> existing StructElem on this page, so multiple
+        # BDC ranges of one diagram collapse into one StructElem with N MCRs.
+        figure_groups: dict = {}
 
         for elem_idx, elem_data in enumerate(struct_elems):
             # Tuples: (mcid, type, alt) or (mcid, type, alt, bbox)
             #     or: (mcid, "/Link", alt, None, annot_obj)
+            #     or: (mcid, "/Figure", alt, bbox, source_fig_id_or_None)
             #     or: (mcid, "/TD"|"/TH", "", None, None, row_idx, table_idx)
             #     or: (mcid, "/TD_CONT", "", None, None, row_idx, table_idx, orig_mcid)
             mcid = elem_data[0]
@@ -1478,7 +1505,14 @@ def _build_structure_tree(pdf: pikepdf.Pdf, all_page_elems: list,
 
             alt_text = elem_data[2]
             fig_bbox = elem_data[3] if len(elem_data) > 3 else None
-            annot_obj = elem_data[4] if len(elem_data) > 4 else None
+            # elem_data[4] is overloaded by tuple type: annot_obj for /Link,
+            # source-/Figure id for /Figure.  Disambiguate explicitly.
+            annot_obj = (elem_data[4]
+                         if struct_type == "/Link" and len(elem_data) > 4
+                         else None)
+            source_fig_id = (elem_data[4]
+                             if struct_type == "/Figure" and len(elem_data) > 4
+                             else None)
             row_idx   = elem_data[5] if len(elem_data) > 5 else None
             table_idx = elem_data[6] if len(elem_data) > 6 else None
 
@@ -1487,6 +1521,35 @@ def _build_structure_tree(pdf: pikepdf.Pdf, all_page_elems: list,
                 "/Pg": page_ref,
                 "/MCID": mcid,
             })
+
+            # Source-/Figure regrouping: every BDC range that shared one
+            # source /Figure becomes additional /MCRs on the existing elem
+            # instead of a duplicate StructElem.  Fixes the "N overlapping
+            # figures with the same alt text" UX bug PAC doesn't catch.
+            if struct_type == "/Figure" and source_fig_id is not None:
+                existing = figure_groups.get(source_fig_id)
+                if existing is not None:
+                    existing_k = existing.get("/K")
+                    if isinstance(existing_k, pikepdf.Array):
+                        existing_k.append(mcr)
+                    else:
+                        existing[pikepdf.Name("/K")] = pikepdf.Array(
+                            [existing_k, mcr]
+                        )
+                    if fig_bbox:
+                        a = existing.get("/A")
+                        if isinstance(a, pikepdf.Dictionary):
+                            old_b = a.get("/BBox")
+                            if old_b is not None and len(old_b) >= 4:
+                                a[pikepdf.Name("/BBox")] = pikepdf.Array([
+                                    min(float(old_b[0]), fig_bbox[0]),
+                                    min(float(old_b[1]), fig_bbox[1]),
+                                    max(float(old_b[2]), fig_bbox[2]),
+                                    max(float(old_b[3]), fig_bbox[3]),
+                                ])
+                    mcid_to_elem[mcid] = existing
+                    page_elem_refs.append(existing)
+                    continue  # already in all_leaf_elems from first occurrence
 
             # Defensive: /Artifact is a marked-content role, never a valid
             # /S value.  If it ever reaches this point a producer upstream is
@@ -1548,6 +1611,11 @@ def _build_structure_tree(pdf: pikepdf.Pdf, all_page_elems: list,
             mcid_to_elem[mcid] = elem
             page_elem_refs.append(elem)
             all_leaf_elems.append((elem, struct_type, row_idx, table_idx))
+
+            # First occurrence of this source-/Figure id: register so
+            # subsequent BDC ranges fold into this same StructElem.
+            if struct_type == "/Figure" and source_fig_id is not None:
+                figure_groups[source_fig_id] = elem
 
             if struct_type == "/Link" and annot_obj is not None:
                 annot_parent_entries.append((annot_obj, elem))
