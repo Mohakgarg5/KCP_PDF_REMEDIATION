@@ -44,6 +44,7 @@ def postprocess_pdf(pdf_path: str, title: str, language: str,
     _fix_cidset_streams(pdf)
     _fix_annotations(pdf)
     _cleanup_empty_markers(pdf)
+    _heal_artifact_struct_elems(pdf)
     _sanitize_non_standard_struct_types(pdf)
     _check_pipeline_invariants(pdf)
 
@@ -214,6 +215,152 @@ def _walk_struct_elements(node, seen=None):
                 yield from _walk_struct_elements(c, seen)
     elif isinstance(kids, pikepdf.Dictionary):
         yield from _walk_struct_elements(kids, seen)
+
+
+def _heal_artifact_struct_elems(pdf: pikepdf.Pdf):
+    """Rewrite any ``/S=/Artifact`` StructElem to a valid PDF/UA-1 type.
+
+    Background: ``/Artifact`` is a marked-content operator, never a struct
+    type.  PAC's "Role mapping of non-standard structure types" check fails
+    on every ``/S=/Artifact`` node it sees, and there is no RoleMap fix
+    (you cannot map ``/Artifact`` to anything sensible).  Pre-Phase-1 builds
+    of this pipeline emitted these elements when a content-stream ``/Figure``
+    BDC range got paired with a mis-typed struct element; the producer has
+    since been hardened (see the assert in ``_build_structure_tree``) but
+    output files from the older code path are still in circulation.
+
+    This sanitizer is the cleanup pass for those files (and the catch-all
+    safety net for any future regression).  For every offending node we:
+
+    1. Look up the BDC tag of its referenced MCID(s) in the actual content
+       stream.
+    2. Align ``/S`` to that tag.  Stream said ``/Figure`` -> set ``/Figure``
+       and fill in the PDF/UA-required ``/Alt`` and ``/A /BBox`` fallbacks.
+       Stream said ``/Artifact`` (or anything non-standard) -> set
+       ``/NonStruct`` (a standard PDF/UA-1 type that maps to "no semantic
+       meaning, just a tagged region").
+    3. Leave the content stream alone; the page's BDC markers and MCIDs are
+       still valid — only the StructElem's /S was wrong.
+
+    Runs BEFORE :func:`_sanitize_non_standard_struct_types` and INV-1 so the
+    invariant pass sees a clean tree.
+    """
+    stroot = pdf.Root.get("/StructTreeRoot")
+    if not stroot:
+        return
+
+    pages_by_og: dict = {}
+    for p in pdf.pages:
+        try:
+            pages_by_og[p.objgen] = p
+        except Exception:
+            pass
+
+    bdc_cache: dict = {}  # page_objgen -> {mcid: bdc_tag_str}
+
+    def _bdc_tag_for(page_og, mcid):
+        if page_og not in bdc_cache:
+            page = pages_by_og.get(page_og)
+            tags: dict = {}
+            if page is not None:
+                try:
+                    ops = list(pikepdf.parse_content_stream(page))
+                except Exception:
+                    ops = []
+                for operands, op in ops:
+                    if str(op) != "BDC" or len(operands) < 2:
+                        continue
+                    tag = operands[0]
+                    attrs = operands[1]
+                    if not hasattr(attrs, "get"):
+                        continue
+                    try:
+                        raw = attrs.get("/MCID")
+                        if raw is None:
+                            continue
+                        tags[int(raw)] = str(tag)
+                    except Exception:
+                        continue
+            bdc_cache[page_og] = tags
+        return bdc_cache[page_og].get(mcid)
+
+    def _mcrs_under(node):
+        """Return [(page_objgen, mcid)] for /MCR children of node's /K."""
+        k = node.get("/K") if hasattr(node, "get") else None
+        if k is None:
+            return []
+        kids = (
+            list(k) if isinstance(k, pikepdf.Array)
+            else [k] if isinstance(k, pikepdf.Dictionary)
+            else []
+        )
+        out = []
+        for kk in kids:
+            if not isinstance(kk, pikepdf.Dictionary):
+                continue
+            pg = kk.get("/Pg")
+            mc = kk.get("/MCID")
+            if pg is None or mc is None:
+                continue
+            try:
+                out.append((pg.objgen, int(mc)))
+            except Exception:
+                continue
+        return out
+
+    healed = 0
+    for node in _walk_struct_elements(stroot):
+        try:
+            s = node.get("/S")
+        except Exception:
+            continue
+        if str(s) != "/Artifact":
+            continue
+
+        mcrs = _mcrs_under(node)
+        bdc_tag = None
+        for page_og, mcid in mcrs:
+            t = _bdc_tag_for(page_og, mcid)
+            if t:
+                bdc_tag = t
+                break
+
+        if bdc_tag == "/Figure":
+            node[pikepdf.Name("/S")] = pikepdf.Name("/Figure")
+            if "/Alt" not in node:
+                node[pikepdf.Name("/Alt")] = pikepdf.String("")
+            if "/A" not in node and "/BBox" not in node and mcrs:
+                page_og, _ = mcrs[0]
+                page = pages_by_og.get(page_og)
+                if page is not None:
+                    try:
+                        mb = page.obj.get("/MediaBox")
+                        if mb is not None and len(mb) >= 4:
+                            node[pikepdf.Name("/A")] = pikepdf.Dictionary({
+                                "/O": pikepdf.Name("/Layout"),
+                                "/BBox": pikepdf.Array([
+                                    float(mb[0]), float(mb[1]),
+                                    float(mb[2]), float(mb[3]),
+                                ]),
+                                "/Placement": pikepdf.Name("/Block"),
+                            })
+                    except Exception:
+                        pass
+        elif bdc_tag and bdc_tag in _STANDARD_STRUCT_TYPES:
+            node[pikepdf.Name("/S")] = pikepdf.Name(bdc_tag)
+        else:
+            # /Artifact in stream, unknown tag, or missing — /NonStruct is
+            # the standard PDF/UA-1 "no semantic role" type.
+            node[pikepdf.Name("/S")] = pikepdf.Name("/NonStruct")
+        healed += 1
+
+    if healed:
+        logger.warning(
+            "Healed %d /S=/Artifact struct element(s) by aligning /S to the "
+            "content-stream BDC tag.  These were produced by a pre-Phase-1 "
+            "tagger; the current producer cannot emit them.",
+            healed,
+        )
 
 
 def _sanitize_non_standard_struct_types(pdf: pikepdf.Pdf):
