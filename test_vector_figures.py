@@ -90,22 +90,27 @@ class TestVectorFigurePreservation(unittest.TestCase):
                 "graph was lost.  Source PDF has 68 Figures.",
             )
 
-    def test_graph_page_has_figure_bdc(self):
-        """Page 3 (large line graph) must have at least one /Figure BDC
-        wrapper in its content stream.
+    def test_chart_pages_have_figure_bdc(self):
+        """Pages 5 and 6 (real charts) must each have at least one /Figure
+        BDC wrapper in the content stream.
 
-        Pre-fix: page 3 had 599 BMC /Artifact wrappers and 0 /Figure
-        wrappers — the entire graph was tagged as decorative.
+        Sugar Daddy fixture source struct tree carries a Bar chart on
+        page 5 and two pie charts on page 6.  Earlier versions of this
+        test asserted page 3 too, but page 3 actually holds Discussion
+        Questions text rendered as vector outlines — it is NOT a graph,
+        and a wide-and-short region at the page bottom is correctly
+        classified as page chrome (the Northwestern footer template).
         """
         with pikepdf.Pdf.open(self.output_path) as pdf:
             counts = _page_struct_type_counts(pdf)
-        page3 = counts.get(3, {})
-        figure_count = page3.get("/Figure", 0)
-        self.assertGreater(
-            figure_count, 0,
-            f"Page 3 (line graph, ~9170 path ops) has 0 /Figure BDC "
-            f"wrappers in content stream. Tags found: {page3}",
-        )
+        for pi in (5, 6):
+            page_counts = counts.get(pi, {})
+            figure_count = page_counts.get("/Figure", 0)
+            self.assertGreater(
+                figure_count, 0,
+                f"Page {pi} (real chart) has 0 /Figure BDC wrappers "
+                f"in content stream. Tags found: {page_counts}",
+            )
 
     def test_graph_pages_have_fewer_artifact_wrappers_than_source(self):
         """Vector-heavy pages should not be exploded into hundreds of

@@ -46,6 +46,14 @@ def tag_pdf(input_path: str, output_path: str, doc_content: DocumentContent) -> 
     # detector fragments them into N pieces and drops the source alt.
     source_figure_alts = _build_source_figure_alt_map(pdf)
 
+    # Pre-scan all pages for vector regions that look like header/footer
+    # banners AND repeat across pages — those are template logos / page
+    # chrome.  A single wide-and-short region on one page is most likely a
+    # legitimate chart with that shape, so we leave it as a /Figure.  This
+    # repetition signal is what lets us classify the Northwestern logo as
+    # /Artifact without misclassifying e.g. sugar_daddy's page-3 line graph.
+    banner_bboxes = _detect_repeating_banner_bboxes(pdf)
+
     _remove_existing_structure(pdf)
 
     all_page_elems = []
@@ -59,6 +67,7 @@ def tag_pdf(input_path: str, output_path: str, doc_content: DocumentContent) -> 
             page_elems = _tag_page(
                 pdf, page, page_content, page_idx, mcid_counter,
                 source_figure_alts=page_source_figure_alts,
+                banner_bboxes=banner_bboxes,
             )
         except Exception as e:
             logger.warning("Page %d tagging failed (%s), wrapping as artifact", page_idx, e)
@@ -83,6 +92,66 @@ def _safe_float(val, default=0.0) -> float:
         return float(val)
     except (ValueError, TypeError, OverflowError):
         return default
+
+
+def _page_mediabox(page) -> Optional[list]:
+    """Return the page's MediaBox as a 4-float list, or None if unavailable."""
+    try:
+        mb = page.get("/MediaBox")
+        if mb is None or len(mb) < 4:
+            return None
+        return [float(mb[0]), float(mb[1]), float(mb[2]), float(mb[3])]
+    except Exception:
+        return None
+
+
+def _is_banner_artifact(bbox, page_box) -> bool:
+    """Heuristic: does this bbox look like a header/footer banner (logo, page
+    chrome) that should be a content-stream /Artifact, not a /Figure?
+
+    Banners share a common shape across the case-PDF corpus (Kellogg /
+    Northwestern logos, page-template borders): they sit in the top or bottom
+    margin band and are either wide-and-short banners or small enough to be
+    purely decorative.  Real charts and diagrams live in the body region and
+    have a substantial vertical extent, so this check rejects them.
+
+    Rules:
+      • In top 20% or bottom 20% of the page (Y-margin band), AND
+        - aspect ratio >= 4:1 and height <= 80pt (banner shape), OR
+        - width <= 120pt and height <= 60pt (icon-sized chrome)
+      • OR extreme banner shape (aspect >= 8:1 and height <= 40pt) anywhere
+        — only page-chrome rules with that aspect ratio appear in real docs
+
+    The margin band runs to 20% because Kellogg / Northwestern case PDFs
+    place their footer logo around the 15-18% Y-band, not strictly within
+    the bottom 10%.  Real charts span a much wider vertical extent and
+    almost always have their centre well inside the body region.
+    """
+    if not bbox or not page_box:
+        return False
+    if len(bbox) < 4 or len(page_box) < 4:
+        return False
+    page_h = page_box[3] - page_box[1]
+    page_w = page_box[2] - page_box[0]
+    if page_h <= 0 or page_w <= 0:
+        return False
+    bw = bbox[2] - bbox[0]
+    bh = bbox[3] - bbox[1]
+    if bw <= 0 or bh <= 0:
+        return False
+    aspect = bw / bh
+    # Extreme-banner shape — page chrome regardless of position.
+    if aspect >= 8.0 and bh <= 40:
+        return True
+    y_center = ((bbox[1] + bbox[3]) / 2 - page_box[1]) / page_h
+    in_margin = y_center >= 0.80 or y_center <= 0.20
+    if not in_margin:
+        return False
+    if aspect >= 4.0 and bh <= 80:
+        return True
+    if bw <= 120 and bh <= 60:
+        return True
+    return False
 
 
 def _resolve_resources(page) -> Optional[pikepdf.Dictionary]:
@@ -173,7 +242,8 @@ def _remove_existing_structure(pdf: pikepdf.Pdf):
 
 def _tag_page(pdf, page, page_content: Optional[PageContent],
               page_idx: int, mcid_counter: list,
-              source_figure_alts: Optional[dict] = None) -> list:
+              source_figure_alts: Optional[dict] = None,
+              banner_bboxes: Optional[set] = None) -> list:
     """Tag a single page's content stream with structure markers."""
     blocks = _build_block_index(page_content)
 
@@ -194,7 +264,13 @@ def _tag_page(pdf, page, page_content: Optional[PageContent],
         ops, blocks, page, watermark_forms, mcid_counter, link_annots, pdf=pdf,
         source_artifact_mask=source_artifact_mask,
         source_figure_regions=source_figure_regions,
+        banner_bboxes=banner_bboxes,
     )
+
+    # Spatially cluster fragmented vector /Figure regions so a chart drawn
+    # as several path-region pieces (with text labels between) becomes one
+    # /Figure StructElem with N /MCRs instead of N separate Figures.
+    struct_elems = _cluster_vector_figures(struct_elems, page_idx)
 
     new_stream_data = pikepdf.unparse_content_stream(new_ops)
     page.Contents = pikepdf.Stream(pdf, new_stream_data)
@@ -494,6 +570,241 @@ def _merge_figure_regions(source_regions: list, auto_regions: list) -> list:
     return merged
 
 
+def _bbox_matches_any(bbox, bbox_set, tol: float = 10.0) -> bool:
+    """True if ``bbox`` is within ``tol`` pt of any 4-tuple in ``bbox_set``.
+
+    Used by the banner-classification check to recognise that a
+    just-detected vector region matches one of the pre-identified
+    repeating-banner positions for the document.
+    """
+    if not bbox or len(bbox) < 4 or not bbox_set:
+        return False
+    for b in bbox_set:
+        if (abs(bbox[0] - b[0]) <= tol
+                and abs(bbox[1] - b[1]) <= tol
+                and abs(bbox[2] - b[2]) <= tol
+                and abs(bbox[3] - b[3]) <= tol):
+            return True
+    return False
+
+
+def _compute_region_bbox(stripped_ops: list, start: int, end: int) -> Optional[list]:
+    """Walk a slice of the post-strip op stream and accumulate a bbox from
+    path-defining points transformed through the running CTM.
+
+    Used by ``_detect_repeating_banner_bboxes`` (the cross-page pre-pass).
+    Tracks ``q``/``Q`` so CTM saves/restores work, ``cm`` for CTM updates,
+    and ``m``/``l``/``c``/``v``/``y``/``re`` for the actual draw points.
+    Returns None when nothing was drawn (empty region).
+    """
+    ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+    stack: list = []
+    bbox: Optional[list] = None
+
+    def _add(ux: float, uy: float):
+        nonlocal bbox
+        if bbox is None:
+            bbox = [ux, uy, ux, uy]
+        else:
+            if ux < bbox[0]: bbox[0] = ux
+            if uy < bbox[1]: bbox[1] = uy
+            if ux > bbox[2]: bbox[2] = ux
+            if uy > bbox[3]: bbox[3] = uy
+
+    def _xform(x: float, y: float):
+        return (
+            ctm[0] * x + ctm[2] * y + ctm[4],
+            ctm[1] * x + ctm[3] * y + ctm[5],
+        )
+
+    end = min(end, len(stripped_ops) - 1)
+    for i in range(max(0, start), end + 1):
+        operands, operator = stripped_ops[i]
+        op = str(operator)
+        if op == "q":
+            stack.append(ctm[:])
+        elif op == "Q":
+            if stack:
+                ctm = stack.pop()
+        elif op == "cm" and len(operands) >= 6:
+            m = [_safe_float(operands[j]) for j in range(6)]
+            ctm = _mat_mul(m, ctm)
+        elif op in ("m", "l") and len(operands) >= 2:
+            try:
+                _add(*_xform(_safe_float(operands[0]), _safe_float(operands[1])))
+            except Exception:
+                pass
+        elif op == "c" and len(operands) >= 6:
+            for j in (0, 2, 4):
+                try:
+                    _add(*_xform(_safe_float(operands[j]),
+                                 _safe_float(operands[j + 1])))
+                except Exception:
+                    pass
+        elif op in ("v", "y") and len(operands) >= 4:
+            for j in (0, 2):
+                try:
+                    _add(*_xform(_safe_float(operands[j]),
+                                 _safe_float(operands[j + 1])))
+                except Exception:
+                    pass
+        elif op == "re" and len(operands) >= 4:
+            try:
+                x = _safe_float(operands[0]); y = _safe_float(operands[1])
+                w = _safe_float(operands[2]); h = _safe_float(operands[3])
+                for cx, cy in ((x, y), (x + w, y), (x + w, y + h), (x, y + h)):
+                    _add(*_xform(cx, cy))
+            except Exception:
+                pass
+    return bbox
+
+
+def _detect_repeating_banner_bboxes(pdf) -> set:
+    """Pre-scan every page for banner-shaped vector regions and return the
+    set of bboxes that appear (within ~10pt tolerance) on >= 2 pages.
+
+    Returns a set of 4-tuples ``(x0, y0, x1, y1)`` representative of each
+    repeating banner position.  Tagger's banner-classification later checks
+    membership in this set so a one-off wide-and-short region (a real chart
+    that happens to be banner-shaped) is NOT misclassified as decorative.
+
+    Implementation note: heavy enough that we only do it once per PDF, in
+    ``tag_pdf``, before per-page tagging starts.  Each page is parsed once
+    in the scan plus once during normal tagging — acceptable cost for the
+    robustness gain (false-positive logos lose real figures).
+    """
+    per_page_candidates: list = []  # one list per page of (bbox4-tuple)
+    for page in pdf.pages:
+        page_box = _page_mediabox(page)
+        if not page_box:
+            per_page_candidates.append([])
+            continue
+        try:
+            raw_ops = list(pikepdf.parse_content_stream(page))
+        except Exception:
+            per_page_candidates.append([])
+            continue
+        stripped, _, _ = _strip_markers_with_source_intent(raw_ops, {})
+        regions = _detect_vector_figure_regions(stripped)
+        page_candidates: list = []
+        for r_start, r_end in regions:
+            bb = _compute_region_bbox(stripped, r_start, r_end)
+            if bb and _is_banner_artifact(bb, page_box):
+                page_candidates.append(tuple(bb))
+        per_page_candidates.append(page_candidates)
+
+    # Cluster: a bbox is "repeating" if a similar bbox (within 10pt) appears
+    # on at least one OTHER page.
+    repeats: set = set()
+    for pi, cands in enumerate(per_page_candidates):
+        for bb in cands:
+            for pj, other in enumerate(per_page_candidates):
+                if pj == pi:
+                    continue
+                if _bbox_matches_any(list(bb), other, tol=10.0):
+                    repeats.add(bb)
+                    break
+    return repeats
+
+
+def _bbox_within_proximity(a, b, proximity: float) -> bool:
+    """True if two bboxes overlap or are within `proximity` pt of each other."""
+    if not a or not b or len(a) < 4 or len(b) < 4:
+        return False
+    return not (
+        a[2] < b[0] - proximity
+        or a[0] > b[2] + proximity
+        or a[3] < b[1] - proximity
+        or a[1] > b[3] + proximity
+    )
+
+
+def _cluster_vector_figures(
+    struct_elems: list, page_idx: int, proximity: float = 60.0,
+) -> list:
+    """Group spatially-adjacent vector ``/Figure`` tuples on one page.
+
+    Vector charts (line / bar / scatter / pie) often render as several
+    separate path-region clusters with text labels between them.  The
+    op-stream merge in ``_detect_vector_figure_regions`` cannot bridge
+    those gaps because text operators block the merge.  This pass merges
+    by bbox proximity instead, assigning each cluster a synthetic
+    ``source_fig_id`` so the existing ``/Figure`` grouping in
+    ``_build_structure_tree`` collapses them into a single StructElem with
+    multiple ``/MCRs``.
+
+    Only acts on ``/Figure`` tuples with ``source_fig_id is None`` (untagged
+    vector detection).  Source-tagged figures keep their authoritative id.
+    Image figures usually have a single bbox per logical image, so they
+    naturally land in their own cluster.
+
+    The synthetic id is a tuple ``("vec-cluster", page_idx, cluster_idx)``
+    that compares equal across re-entries on the same page and never
+    collides with the integer ids the source-figure path emits.
+    """
+    candidates = []
+    for i, t in enumerate(struct_elems):
+        if (t[1] == "/Figure"
+                and len(t) >= 5
+                and t[4] is None
+                and t[3] is not None
+                and len(t[3]) == 4):
+            candidates.append((i, list(t[3])))
+    if len(candidates) < 2:
+        return struct_elems
+
+    clusters: list = []  # each: {"bbox": [x0,y0,x1,y1], "members": [idx, ...]}
+    for tuple_idx, bbox in candidates:
+        joined = False
+        for c in clusters:
+            if _bbox_within_proximity(bbox, c["bbox"], proximity):
+                c["members"].append(tuple_idx)
+                c["bbox"] = [
+                    min(c["bbox"][0], bbox[0]),
+                    min(c["bbox"][1], bbox[1]),
+                    max(c["bbox"][2], bbox[2]),
+                    max(c["bbox"][3], bbox[3]),
+                ]
+                joined = True
+                break
+        if not joined:
+            clusters.append({"bbox": bbox, "members": [tuple_idx]})
+
+    # Second-order merge: after greedy assignment, two clusters whose
+    # extended bboxes are now within proximity should themselves merge.
+    # Iterate until stable so a chain of fragments collapses fully.
+    changed = True
+    while changed and len(clusters) >= 2:
+        changed = False
+        for i in range(len(clusters)):
+            if changed:
+                break
+            for j in range(i + 1, len(clusters)):
+                if _bbox_within_proximity(
+                    clusters[i]["bbox"], clusters[j]["bbox"], proximity,
+                ):
+                    clusters[i]["members"].extend(clusters[j]["members"])
+                    clusters[i]["bbox"] = [
+                        min(clusters[i]["bbox"][0], clusters[j]["bbox"][0]),
+                        min(clusters[i]["bbox"][1], clusters[j]["bbox"][1]),
+                        max(clusters[i]["bbox"][2], clusters[j]["bbox"][2]),
+                        max(clusters[i]["bbox"][3], clusters[j]["bbox"][3]),
+                    ]
+                    clusters.pop(j)
+                    changed = True
+                    break
+
+    out = list(struct_elems)
+    for ci, cluster in enumerate(clusters):
+        if len(cluster["members"]) < 2:
+            continue
+        synth_id = ("vec-cluster", page_idx, ci)
+        for tuple_idx in cluster["members"]:
+            t = out[tuple_idx]
+            out[tuple_idx] = (t[0], t[1], t[2], t[3], synth_id) + tuple(t[5:])
+    return out
+
+
 def _region_is_source_artifact(start: int, end: int, mask: list) -> bool:
     """Return True if the op-range [start..end] was predominantly inside a
     /Artifact marker in the source content stream.
@@ -629,7 +940,7 @@ def _clean_form_xobject_markers(pdf: pikepdf.Pdf, page, xobj_name: str):
 
 def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
                     link_annots=None, pdf=None, source_artifact_mask=None,
-                    source_figure_regions=None):
+                    source_figure_regions=None, banner_bboxes=None):
     """Walk through content stream ops, inserting BDC/EMC structure markers.
 
     Uses an "artifact-as-default" strategy so nothing is ever untagged.
@@ -648,6 +959,9 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
         link_annots = []
     new_ops = []
     struct_elems = []
+
+    # Page bounding box used by header/footer banner detection.
+    page_box = _page_mediabox(page)
 
     # -- state tracking --
     # Account for page /Rotate: adjust initial CTM so position calculations
@@ -899,6 +1213,7 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
                     figure_region_alt = blocks[vec_idx]["alt_text"]
                 else:
                     figure_region_alt = "Figure"
+            figure_bdc_op_idx = len(new_ops)
             new_ops.append((
                 [pikepdf.Name("/Figure"),
                  pikepdf.Dictionary({"/MCID": figure_mcid})],
@@ -939,6 +1254,42 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
                         figure_region_bbox[3] = max(figure_region_bbox[3], uy)
                 except Exception:
                     pass
+            elif op == "c" and len(operands) >= 6:
+                # Bezier curveto: x1 y1 x2 y2 x3 y3 c — three control points,
+                # each contributes to the path bounds (control points define
+                # the convex hull the curve stays within).
+                try:
+                    for j in (0, 2, 4):
+                        x = _safe_float(operands[j])
+                        y = _safe_float(operands[j + 1])
+                        ux = ctm[0] * x + ctm[2] * y + ctm[4]
+                        uy = ctm[1] * x + ctm[3] * y + ctm[5]
+                        if figure_region_bbox is None:
+                            figure_region_bbox = [ux, uy, ux, uy]
+                        else:
+                            figure_region_bbox[0] = min(figure_region_bbox[0], ux)
+                            figure_region_bbox[1] = min(figure_region_bbox[1], uy)
+                            figure_region_bbox[2] = max(figure_region_bbox[2], ux)
+                            figure_region_bbox[3] = max(figure_region_bbox[3], uy)
+                except Exception:
+                    pass
+            elif op in ("v", "y") and len(operands) >= 4:
+                # Bezier shortcut forms — two explicit points contribute.
+                try:
+                    for j in (0, 2):
+                        x = _safe_float(operands[j])
+                        y = _safe_float(operands[j + 1])
+                        ux = ctm[0] * x + ctm[2] * y + ctm[4]
+                        uy = ctm[1] * x + ctm[3] * y + ctm[5]
+                        if figure_region_bbox is None:
+                            figure_region_bbox = [ux, uy, ux, uy]
+                        else:
+                            figure_region_bbox[0] = min(figure_region_bbox[0], ux)
+                            figure_region_bbox[1] = min(figure_region_bbox[1], uy)
+                            figure_region_bbox[2] = max(figure_region_bbox[2], ux)
+                            figure_region_bbox[3] = max(figure_region_bbox[3], uy)
+                except Exception:
+                    pass
             elif op == "re" and len(operands) >= 4:
                 try:
                     x = _safe_float(operands[0])
@@ -966,13 +1317,62 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
                 # struct-tree builder groups every BDC range sharing this id
                 # under ONE output /Figure StructElem with multiple /MCRs.
                 new_ops.append(([], pikepdf.Operator("EMC")))
-                struct_elems.append((
-                    figure_region_mcid,
-                    "/Figure",
-                    figure_region_alt,
-                    figure_region_bbox,
-                    figure_region_source_id,
-                ))
+                # Banner heuristic: if the region's bbox is a header/footer
+                # banner (school logo, page chrome) it should be a content-
+                # stream /Artifact, not a /Figure StructElem.  Rewrite the
+                # already-emitted BDC to /Artifact, return the MCID to the
+                # counter, and skip the struct_elems append.  Source-id-tagged
+                # regions are always trusted (the author marked them /Figure).
+                # Banner override: also fire when the SOURCE tagged this as a
+                # /Figure but the alt is empty or the generic "Figure" string.
+                # In those cases the author flagged page chrome as a Figure
+                # by mistake (common with auto-tagged exports); a real Figure
+                # would carry descriptive alt text.
+                alt_is_generic = (
+                    not figure_region_alt
+                    or figure_region_alt.strip().lower() in ("figure", "image", "")
+                )
+                # The bbox shape alone cannot fully distinguish a school-
+                # logo banner from a wide-and-short chart.  The strongest
+                # signal is REPETITION: real charts are unique per page;
+                # template logos repeat across pages (pre-pass collects
+                # those into banner_bboxes).  Two-tier gate:
+                #   1. If region matches a pre-detected repeating banner →
+                #      classify (high-confidence).
+                #   2. Else (single-page detection) → fall back to the
+                #      shape-only check when (a) the source did not flag
+                #      this as /Figure with a descriptive alt, AND (b) the
+                #      shape qualifies as a banner.  Page-template chrome
+                #      typically lacks descriptive alt; real charts come
+                #      from source authors with meaningful labels.
+                is_banner = False
+                if _is_banner_artifact(figure_region_bbox, page_box):
+                    if banner_bboxes and _bbox_matches_any(
+                        figure_region_bbox, banner_bboxes, tol=10.0,
+                    ):
+                        is_banner = True
+                    elif figure_region_source_id is None or alt_is_generic:
+                        is_banner = True
+                if is_banner:
+                    new_ops[figure_bdc_op_idx] = (
+                        [pikepdf.Name("/Artifact"),
+                         pikepdf.Dictionary({
+                             "/Type": pikepdf.Name("/Pagination"),
+                         })],
+                        pikepdf.Operator("BDC"),
+                    )
+                    # MCID was the most recently allocated on this page; safely
+                    # return it so the ParentTree stays MCID-contiguous.
+                    if mcid_counter[0] == figure_region_mcid + 1:
+                        mcid_counter[0] = figure_region_mcid
+                else:
+                    struct_elems.append((
+                        figure_region_mcid,
+                        "/Figure",
+                        figure_region_alt,
+                        figure_region_bbox,
+                        figure_region_source_id,
+                    ))
                 in_figure_region = False
                 figure_region_end_idx = -1
                 figure_region_mcid = -1
@@ -1114,6 +1514,35 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
                 img_idx = _find_image_block_by_position(blocks, img_x, img_y)
 
                 if img_idx is not None and not blocks[img_idx].get("is_artifact"):
+                    # Compute bbox first so the banner check happens BEFORE
+                    # MCID allocation.  Image space is the unit square; CTM
+                    # maps (0,0)-(1,1) to the placement rectangle.
+                    x0 = ctm[4]
+                    y0 = ctm[5]
+                    x1 = ctm[4] + ctm[0]
+                    y1 = ctm[5] + ctm[3]
+                    fig_bbox = [min(x0, x1), min(y0, y1),
+                                max(x0, x1), max(y0, y1)]
+
+                    if _is_banner_artifact(fig_bbox, page_box):
+                        # Wide-and-short or icon-sized image in the page-margin
+                        # band: emit as content-stream /Artifact so the logo
+                        # doesn't end up as a /Figure with generic alt.
+                        _close_struct()
+                        _close_artifact()
+                        blocks[img_idx]["used"] = True
+                        new_ops.append((
+                            [pikepdf.Name("/Artifact"),
+                             pikepdf.Dictionary({
+                                 "/Type": pikepdf.Name("/Pagination"),
+                             })],
+                            pikepdf.Operator("BDC"),
+                        ))
+                        new_ops.append((operands, operator))
+                        new_ops.append(([], pikepdf.Operator("EMC")))
+                        _open_artifact()
+                        continue
+
                     _close_struct()
                     _close_artifact()
                     mcid = mcid_counter[0]
@@ -1127,13 +1556,6 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
                     new_ops.append((operands, operator))
                     new_ops.append(([], pikepdf.Operator("EMC")))
                     alt = blocks[img_idx].get("alt_text", "Image")
-                    # Compute bbox from CTM (image space is unit square)
-                    x0 = ctm[4]
-                    y0 = ctm[5]
-                    x1 = ctm[4] + ctm[0]
-                    y1 = ctm[5] + ctm[3]
-                    fig_bbox = [min(x0, x1), min(y0, y1),
-                                max(x0, x1), max(y0, y1)]
                     struct_elems.append((mcid, "/Figure", alt, fig_bbox))
                     _open_artifact()
                     continue
@@ -1142,6 +1564,29 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
                 # If a vector figure placeholder exists for this page, tag this
                 # Form XObject as a Figure (vector chart/diagram from InDesign).
                 vec_idx = _find_vector_figure_block(blocks)
+                # Compute bbox first so the banner check happens BEFORE we
+                # commit to /Figure tagging or touch the Form's internal
+                # markers.
+                form_bbox = _compute_form_bbox(page, xobj_name, ctm)
+
+                if _is_banner_artifact(form_bbox, page_box):
+                    # Header/footer logo or template-banner Form XObject:
+                    # emit as content-stream /Artifact instead of /Figure so
+                    # screen readers skip the page chrome.
+                    _close_struct()
+                    _close_artifact()
+                    new_ops.append((
+                        [pikepdf.Name("/Artifact"),
+                         pikepdf.Dictionary({
+                             "/Type": pikepdf.Name("/Pagination"),
+                         })],
+                        pikepdf.Operator("BDC"),
+                    ))
+                    new_ops.append((operands, operator))
+                    new_ops.append(([], pikepdf.Operator("EMC")))
+                    _open_artifact()
+                    continue
+
                 # Strip any Artifact/BDC/EMC markers from the Form's own content
                 # stream before wrapping it as Figure.  Internal markers inside a
                 # Figure-wrapped Form violate PDF/UA Clause 7.1 (Artifact inside
@@ -1168,10 +1613,6 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
                     # as individual tagged elements (reviewer request: don't break
                     # figures into their constituent components).
                     alt = "Figure"
-                # Compute bbox from the Form XObject's /BBox and the
-                # current CTM so the Figure struct element satisfies
-                # PDF/UA bounding-box requirements.
-                form_bbox = _compute_form_bbox(page, xobj_name, ctm)
                 struct_elems.append((mcid, "/Figure", alt, form_bbox))
                 _open_artifact()
                 continue
