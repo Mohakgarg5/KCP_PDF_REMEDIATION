@@ -118,7 +118,12 @@ def _is_banner_artifact(bbox, page_box) -> bool:
     Rules:
       • In top 20% or bottom 20% of the page (Y-margin band), AND
         - aspect ratio >= 4:1 and height <= 80pt (banner shape), OR
-        - width <= 120pt and height <= 60pt (icon-sized chrome)
+        - aspect ratio >= 3:1 and height <= 50pt (short banner — Phase 4,
+          catches single-page Kellogg logos around 123×35 / 143×45 that
+          the wider aspect>=4 rule missed by 0.5pt), OR
+        - width <= 150pt and height <= 60pt (icon-sized chrome — Phase 4
+          widened from 120pt because real logo bboxes were measured at
+          122–145pt wide on the reversionfixes(3) batch)
       • OR extreme banner shape (aspect >= 8:1 and height <= 40pt) anywhere
         — only page-chrome rules with that aspect ratio appear in real docs
 
@@ -126,6 +131,16 @@ def _is_banner_artifact(bbox, page_box) -> bool:
     place their footer logo around the 15-18% Y-band, not strictly within
     the bottom 10%.  Real charts span a much wider vertical extent and
     almost always have their centre well inside the body region.
+
+    Phase 4 widening rationale: the Phase-3 corpus used logos that
+    REPEATED across pages, which the cross-page pre-pass catches
+    regardless of the geometric thresholds here.  The 2026-05-29
+    reversionfixes(3) batch surfaced single-page logos (Asahi page 3,
+    Keurig page 11) where geometry is the only available signal — they
+    measured aspect 3.18-3.54 and width 122-143pt, just outside the
+    Phase-3 thresholds.  The new sub-rule is still margin-band-gated
+    and height-capped at 50pt, so a real body chart that dips into the
+    margin band stays a Figure.
     """
     if not bbox or not page_box:
         return False
@@ -149,7 +164,11 @@ def _is_banner_artifact(bbox, page_box) -> bool:
         return False
     if aspect >= 4.0 and bh <= 80:
         return True
-    if bw <= 120 and bh <= 60:
+    # Phase 4: short banner, aspect 3.0-4.0 (Kellogg-shaped logos).
+    if aspect >= 3.0 and bh <= 50:
+        return True
+    # Phase 4: widened icon-chrome rule (was bw <= 120).
+    if bw <= 150 and bh <= 60:
         return True
     return False
 
