@@ -105,6 +105,25 @@ def _page_mediabox(page) -> Optional[list]:
         return None
 
 
+def _sanitize_alt_text(alt) -> str:
+    """Strip control characters (notably the trailing NUL byte) from /Alt.
+
+    Source ``/Alt`` strings authored as UTF-16 sometimes carry a trailing
+    ``\\x00`` terminator that pikepdf surfaces verbatim; left in place it
+    leaks into the output /Alt and some assistive-tech readers voice or
+    choke on it.  Drop every C0 control char except common whitespace
+    (tab/newline), then trim surrounding whitespace.
+    """
+    if not alt:
+        return ""
+    s = str(alt)
+    cleaned = "".join(
+        ch for ch in s
+        if ch in ("\t", "\n", "\r") or ord(ch) >= 0x20
+    )
+    return cleaned.strip()
+
+
 def _is_banner_artifact(bbox, page_box) -> bool:
     """Heuristic: does this bbox look like a header/footer banner (logo, page
     chrome) that should be a content-stream /Artifact, not a /Figure?
@@ -1523,6 +1542,19 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
 
             xobj_type = _get_xobject_subtype(page, xobj_name)
 
+            # Honour the source author's explicit decorative intent: if this
+            # Do was originally nested inside a source /Artifact range (incl.
+            # /Pagination /Header|/Footer page chrome), it MUST stay an
+            # artifact — never get promoted to a /Figure with generic alt.
+            # This catches header/footer logos regardless of aspect ratio,
+            # so it is more robust than the geometric banner gate alone
+            # (e.g. Boston Metro's page-1 logos at aspect 1.87 / 2.9).
+            src_artifact = bool(
+                source_artifact_mask is not None
+                and 0 <= idx < len(source_artifact_mask)
+                and source_artifact_mask[idx]
+            )
+
             if xobj_type == "Image":
                 # Position-based image matching using full CTM transform
                 # The image is placed at (0,0)-(1,1) in image space; CTM maps
@@ -1543,10 +1575,11 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
                     fig_bbox = [min(x0, x1), min(y0, y1),
                                 max(x0, x1), max(y0, y1)]
 
-                    if _is_banner_artifact(fig_bbox, page_box):
-                        # Wide-and-short or icon-sized image in the page-margin
-                        # band: emit as content-stream /Artifact so the logo
-                        # doesn't end up as a /Figure with generic alt.
+                    if src_artifact or _is_banner_artifact(fig_bbox, page_box):
+                        # Source marked it decorative, OR it is a wide-and-short
+                        # / icon-sized image in the page-margin band: emit as
+                        # content-stream /Artifact so the logo doesn't end up as
+                        # a /Figure with generic alt.
                         _close_struct()
                         _close_artifact()
                         blocks[img_idx]["used"] = True
@@ -1588,10 +1621,11 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
                 # markers.
                 form_bbox = _compute_form_bbox(page, xobj_name, ctm)
 
-                if _is_banner_artifact(form_bbox, page_box):
-                    # Header/footer logo or template-banner Form XObject:
-                    # emit as content-stream /Artifact instead of /Figure so
-                    # screen readers skip the page chrome.
+                if src_artifact or _is_banner_artifact(form_bbox, page_box):
+                    # Source marked it decorative, OR a header/footer logo /
+                    # template-banner Form XObject by shape: emit as
+                    # content-stream /Artifact instead of /Figure so screen
+                    # readers skip the page chrome.
                     _close_struct()
                     _close_artifact()
                     new_ops.append((
@@ -2035,6 +2069,7 @@ def _build_structure_tree(pdf: pikepdf.Pdf, all_page_elems: list,
             else:
                 elem_dict["/K"] = mcr
 
+            alt_text = _sanitize_alt_text(alt_text)
             if struct_type == "/Figure" and alt_text:
                 elem_dict["/Alt"] = pikepdf.String(alt_text)
 

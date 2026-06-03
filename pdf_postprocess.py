@@ -12,6 +12,7 @@ Uses pikepdf to ensure all catalog-level requirements are met:
 """
 import logging
 import os
+import re
 import sys
 from io import BytesIO
 
@@ -1440,6 +1441,66 @@ def _try_embed_font(pdf: pikepdf.Pdf, font_obj, base_font: str):
         tt.close()
 
 
+_SUBSET_PREFIX_RE = re.compile(r"^[A-Z]{6}\+")
+
+
+def _liberation_fallback(base_font: str):
+    """Map ANY recognizable Latin text font to its metric-compatible
+    Liberation face (``fonts-liberation`` ships on the Streamlit/Docker
+    deploy).
+
+    The explicit ``_FONT_FILE_NAMES`` table only keys the canonical
+    PostScript names (``ArialMT``, ``Helvetica``, …).  A font named with
+    a bare family (``Arial``) or comma-style weight (``Arial,Bold`` — how
+    Excel/Office embeds spreadsheet tables) had no entry, so on a host
+    without the real MS face it stayed *un-embedded* — the KEL348 Cotton
+    page-11 "Font not embedded" PAC error.
+
+    This classifier is family + style based so no common Latin font slips
+    through:
+
+      * serif  (Times / *Serif* / Georgia / Cambria)  -> LiberationSerif
+      * mono   (Courier / *Mono* / Consolas)           -> LiberationMono
+      * sans   (everything else Latin)                 -> LiberationSans
+
+    Symbol / dingbat / wingding faces return ``None`` — substituting a
+    Latin sans there would paint the wrong glyphs, so they fall through to
+    the other ``_find_system_font`` strategies (or stay flagged).
+
+    Returns a Liberation filename (e.g. ``LiberationSans-Bold.ttf``) or
+    ``None``.
+    """
+    if not base_font:
+        return None
+    name = _SUBSET_PREFIX_RE.sub("", str(base_font))
+    low = name.lower()
+
+    # Symbol / pictographic faces have no Latin metric equivalent.
+    if any(tok in low for tok in ("symbol", "dingbat", "wingding",
+                                  "webding", "zapf")):
+        return None
+
+    if any(tok in low for tok in ("times", "serif", "georgia", "cambria",
+                                  "roman", "minion", "garamond")):
+        family = "Serif"
+    elif any(tok in low for tok in ("courier", "mono", "consol")):
+        family = "Mono"
+    else:
+        family = "Sans"
+
+    bold = "bold" in low
+    italic = "italic" in low or "oblique" in low
+    if bold and italic:
+        style = "-BoldItalic"
+    elif bold:
+        style = "-Bold"
+    elif italic:
+        style = "-Italic"
+    else:
+        style = "-Regular"
+    return f"Liberation{family}{style}.ttf"
+
+
 def _find_system_font(base_font: str):
     """Find a system font file matching the PDF BaseFont name.
 
@@ -1447,8 +1508,9 @@ def _find_system_font(base_font: str):
     1. Exact match from known font name → filename map
     2. Direct filename match (BaseFont.ttf)
     3. Fuzzy match: strip style suffixes, try common variants
-    4. TTC (TrueType Collection) map for macOS system fonts
-    5. fc-match on Linux
+    4. Family/style Liberation fallback (Linux/Docker deploy)
+    5. TTC (TrueType Collection) map for macOS system fonts
+    6. fc-match on Linux
 
     Returns:
         str path for TTF files, or (str path, int index) tuple for TTC files,
@@ -1476,6 +1538,13 @@ def _find_system_font(base_font: str):
             family = base_font.split(sep)[0]
             candidates.append(family + ".ttf")
             candidates.append(family + ".TTF")
+
+    # Family/style Liberation fallback — listed LAST so a real same-name
+    # face (e.g. macOS Arial.ttf) still wins, but on a Liberation-only
+    # Linux/Docker host a bare "Arial" / "Arial,Bold" still resolves.
+    lib_fallback = _liberation_fallback(base_font)
+    if lib_fallback:
+        candidates.append(lib_fallback)
 
     for font_dir in _FONT_DIRS:
         if not os.path.isdir(font_dir):
