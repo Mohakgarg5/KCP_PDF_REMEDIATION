@@ -1391,7 +1391,17 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
                         is_banner = True
                     elif figure_region_source_id is None or alt_is_generic:
                         is_banner = True
-                if is_banner:
+                # Full-page background panel: older InDesign exports draw a
+                # page-spanning colour panel / frame directly in the content
+                # stream.  When it isn't a source-tagged Figure and has only
+                # generic alt, it is page chrome, not a content figure — the
+                # same defect as the full-page /Fm0 form, via the vector path.
+                is_full_page_chrome = (
+                    figure_region_source_id is None
+                    and alt_is_generic
+                    and _bbox_is_full_page(figure_region_bbox, page_box)
+                )
+                if is_banner or is_full_page_chrome:
                     new_ops[figure_bdc_op_idx] = (
                         [pikepdf.Name("/Artifact"),
                          pikepdf.Dictionary({
@@ -1621,11 +1631,29 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
                 # markers.
                 form_bbox = _compute_form_bbox(page, xobj_name, ctm)
 
-                if src_artifact or _is_banner_artifact(form_bbox, page_box):
-                    # Source marked it decorative, OR a header/footer logo /
-                    # template-banner Form XObject by shape: emit as
-                    # content-stream /Artifact instead of /Figure so screen
-                    # readers skip the page chrome.
+                # Full-page background template (older InDesign exports draw
+                # the page frame + rotated spine-title boilerplate as a
+                # single full-page /Fm0).  vec_idx is None means no real
+                # vector chart was detected here, so a page-spanning,
+                # image-free form is decoration — not a content figure.
+                full_page_chrome = (
+                    vec_idx is None
+                    and _form_is_full_page_background(
+                        page, xobj_name, form_bbox, page_box)
+                )
+
+                if (src_artifact or full_page_chrome
+                        or _is_banner_artifact(form_bbox, page_box)):
+                    # Source marked it decorative, a full-page template, OR a
+                    # header/footer logo / template-banner Form XObject by
+                    # shape: emit as content-stream /Artifact instead of
+                    # /Figure so screen readers skip the page chrome.
+                    # Strip the Form's OWN internal marked content first — a
+                    # full-page background form can carry nested /Figure or
+                    # /Span tags (InDesign /PlacedPDF), and tagged content
+                    # inside an /Artifact range violates PDF/UA clause 7.1.
+                    if pdf is not None:
+                        _clean_form_xobject_markers(pdf, page, xobj_name)
                     _close_struct()
                     _close_artifact()
                     new_ops.append((
@@ -1879,6 +1907,86 @@ def _compute_form_bbox(page, xobj_name: str, ctm: list) -> Optional[list]:
         return [min(xs), min(ys), max(xs), max(ys)]
     except Exception:
         return None
+
+
+def _bbox_is_full_page(bbox, page_box, frac: float = 0.9) -> bool:
+    """True if ``bbox`` blankets ~the whole page in BOTH dimensions."""
+    if not bbox or not page_box or len(bbox) < 4 or len(page_box) < 4:
+        return False
+    pw = page_box[2] - page_box[0]
+    ph = page_box[3] - page_box[1]
+    if pw <= 0 or ph <= 0:
+        return False
+    bw = abs(bbox[2] - bbox[0])
+    bh = abs(bbox[3] - bbox[1])
+    return bw >= frac * pw and bh >= frac * ph
+
+
+def _form_contains_image(page, xobj_name: str) -> bool:
+    """True if the named Form XObject embeds a raster image (directly or
+    in a nested Form, up to a few levels).  Used to spare a genuine
+    full-page photo/scan from the background-chrome demotion."""
+    xobjects = _get_xobjects(page)
+    if not xobjects:
+        return False
+    obj = xobjects.get(xobj_name) or xobjects.get(xobj_name.lstrip("/"))
+    if obj is None:
+        return False
+    seen: set = set()
+
+    def _has_image(form, depth=0):
+        if depth > 3:
+            return False
+        try:
+            res = form.get("/Resources")
+        except Exception:
+            return False
+        if not res:
+            return False
+        xo = res.get("/XObject")
+        if not xo:
+            return False
+        for _name, v in xo.items():
+            try:
+                og = v.objgen
+                if og in seen:
+                    continue
+                seen.add(og)
+            except Exception:
+                pass
+            st = v.get("/Subtype")
+            if st == pikepdf.Name.Image:
+                return True
+            if st == pikepdf.Name.Form and _has_image(v, depth + 1):
+                return True
+        return False
+
+    try:
+        return _has_image(obj)
+    except Exception:
+        return False
+
+
+def _form_is_full_page_background(page, xobj_name: str,
+                                  form_bbox, page_box) -> bool:
+    """A Form XObject that blankets ~the entire page and carries no raster
+    image is page-template chrome (background frame, rotated spine-title
+    boilerplate) — decoration, not a content figure.
+
+    Older InDesign exports draw exactly such a full-page ``/Fm0`` on every
+    page while the real text lives in the page content stream; tagging the
+    form as a ``/Figure`` turns every page into one big figure.  Requiring
+    full-page coverage in BOTH dimensions keeps real inline diagrams
+    (smaller, or not full-bleed) as Figures, and the image check leaves a
+    genuine full-page photo to the figure path.
+
+    ``page`` may be ``None`` (geometry-only fast path used in unit tests).
+    """
+    if not _bbox_is_full_page(form_bbox, page_box):
+        return False
+    if page is not None and _form_contains_image(page, xobj_name):
+        return False
+    return True
 
 
 def _get_xobject_subtype(page, xobj_name: str) -> str:
