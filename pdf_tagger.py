@@ -1346,6 +1346,46 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
                             figure_region_bbox[3] = max(figure_region_bbox[3], uy)
                 except Exception:
                     pass
+            elif op == "Do" and len(operands) >= 1:
+                # A source /Figure BDC range that wraps ONLY an image or form
+                # XObject (``cm`` + ``Do`` with no path operators) would leave
+                # figure_region_bbox None and fall back to the whole MediaBox
+                # (the "exhibit page comes up as a full figure" bug).  Fold the
+                # XObject's placement rectangle into the region bbox so the
+                # /Figure carries its real, sub-page bounds.
+                try:
+                    xname = str(operands[0])
+                    xsub = _get_xobject_subtype(page, xname)
+                    do_bbox = None
+                    if xsub == "Image":
+                        # Image space is the unit square; map all 4 corners
+                        # through the CTM so rotation/skew are handled.
+                        corners = [
+                            (ctm[4], ctm[5]),
+                            (ctm[0] + ctm[4], ctm[1] + ctm[5]),
+                            (ctm[2] + ctm[4], ctm[3] + ctm[5]),
+                            (ctm[0] + ctm[2] + ctm[4],
+                             ctm[1] + ctm[3] + ctm[5]),
+                        ]
+                        xs = [c[0] for c in corners]
+                        ys = [c[1] for c in corners]
+                        do_bbox = [min(xs), min(ys), max(xs), max(ys)]
+                    elif xsub == "Form":
+                        do_bbox = _compute_form_bbox(page, xname, ctm)
+                    if do_bbox:
+                        if figure_region_bbox is None:
+                            figure_region_bbox = list(do_bbox)
+                        else:
+                            figure_region_bbox[0] = min(figure_region_bbox[0],
+                                                        do_bbox[0])
+                            figure_region_bbox[1] = min(figure_region_bbox[1],
+                                                        do_bbox[1])
+                            figure_region_bbox[2] = max(figure_region_bbox[2],
+                                                        do_bbox[2])
+                            figure_region_bbox[3] = max(figure_region_bbox[3],
+                                                        do_bbox[3])
+                except Exception:
+                    pass
 
             new_ops.append((operands, operator))
 
@@ -1401,7 +1441,17 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
                     and alt_is_generic
                     and _bbox_is_full_page(figure_region_bbox, page_box)
                 )
-                if is_banner or is_full_page_chrome:
+                # Table ruling lines / grid bands: an auto-detected, generic-
+                # alt region whose geometry is a degenerate sliver (a single
+                # rule) or a thin strip spanning most of the page is table
+                # chrome, not a content figure (Katharine: "parts of tables
+                # marked as figures").
+                is_ruling_chrome = (
+                    figure_region_source_id is None
+                    and alt_is_generic
+                    and _is_ruling_chrome_bbox(figure_region_bbox)
+                )
+                if is_banner or is_full_page_chrome or is_ruling_chrome:
                     new_ops[figure_bdc_op_idx] = (
                         [pikepdf.Name("/Artifact"),
                          pikepdf.Dictionary({
@@ -1636,8 +1686,17 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
                 # single full-page /Fm0).  vec_idx is None means no real
                 # vector chart was detected here, so a page-spanning,
                 # image-free form is decoration — not a content figure.
+                #
+                # When the page DOES have source /Figure BDC ranges, the real
+                # exhibit is the source-grouped path region (handled by the
+                # figure-region branch — any form INSIDE such a range never
+                # reaches this Form-Do branch).  A full-page form arriving
+                # here is therefore the background template, not the chart:
+                # the vec_idx block belongs to that source figure, so it must
+                # not promote the background form to a duplicate full-page
+                # /Figure with the chart's alt.
                 full_page_chrome = (
-                    vec_idx is None
+                    (vec_idx is None or bool(source_figure_regions))
                     and _form_is_full_page_background(
                         page, xobj_name, form_bbox, page_box)
                 )
@@ -1922,6 +1981,72 @@ def _bbox_is_full_page(bbox, page_box, frac: float = 0.9) -> bool:
     return bw >= frac * pw and bh >= frac * ph
 
 
+def _is_ruling_chrome_bbox(bbox,
+                           sliver_pt: float = 3.0,
+                           strip_thin_pt: float = 60.0,
+                           strip_aspect: float = 8.0) -> bool:
+    """True if ``bbox`` is a table ruling line or thin grid band.
+
+    Two shapes qualify (both rotation-agnostic, working off |w| and |h|):
+      * a degenerate sliver — one side <= ``sliver_pt`` (a single rule), and
+      * a thin strip — shorter side < ``strip_thin_pt`` while the aspect
+        ratio exceeds ``strip_aspect`` (a ruled band spanning the page).
+
+    Real charts/diagrams are chunky (modest aspect, both sides well above a
+    few points), so this never fires on a genuine figure.
+    """
+    if not bbox or len(bbox) < 4:
+        return False
+    w = abs(bbox[2] - bbox[0])
+    h = abs(bbox[3] - bbox[1])
+    if w <= 0 or h <= 0:
+        return True
+    lo, hi = min(w, h), max(w, h)
+    if lo <= sliver_pt:
+        return True
+    if lo < strip_thin_pt and (hi / lo) > strip_aspect:
+        return True
+    return False
+
+
+def _unrotate_bbox_for_page(bbox, page):
+    """Map a rotated-display-space bbox back to the page's default user space.
+
+    ``_insert_markers`` seeds the CTM with the page /Rotate so image position
+    matching lines up; the side effect is that accumulated figure bboxes come
+    out in rotated space (negative/off-page on 90/270 pages).  This inverts
+    exactly that rotation-about-origin so the emitted /Figure /BBox is valid
+    default-user-space.  rotate 0 (the common case) returns the bbox unchanged.
+    """
+    if not bbox or len(bbox) < 4:
+        return bbox
+    try:
+        rotate = int(page.get("/Rotate", 0)) % 360
+    except (ValueError, TypeError):
+        rotate = 0
+    if rotate == 0:
+        return bbox
+    # Corners, inverse of the seed matrices in _insert_markers:
+    #   90:  display (X,Y) = (-y, x)  -> default (x,y) = (Y, -X)
+    #   180: display (X,Y) = (-x,-y)  -> default (x,y) = (-X, -Y)
+    #   270: display (X,Y) = (y, -x)  -> default (x,y) = (-Y, X)
+    corners = [(bbox[0], bbox[1]), (bbox[2], bbox[1]),
+               (bbox[2], bbox[3]), (bbox[0], bbox[3])]
+    mapped = []
+    for X, Y in corners:
+        if rotate == 90:
+            mapped.append((Y, -X))
+        elif rotate == 180:
+            mapped.append((-X, -Y))
+        elif rotate == 270:
+            mapped.append((-Y, X))
+        else:
+            mapped.append((X, Y))
+    xs = [p[0] for p in mapped]
+    ys = [p[1] for p in mapped]
+    return [min(xs), min(ys), max(xs), max(ys)]
+
+
 def _form_contains_image(page, xobj_name: str) -> bool:
     """True if the named Form XObject embeds a raster image (directly or
     in a nested Form, up to a few levels).  Used to spare a genuine
@@ -2107,6 +2232,14 @@ def _build_structure_tree(pdf: pikepdf.Pdf, all_page_elems: list,
 
             alt_text = elem_data[2]
             fig_bbox = elem_data[3] if len(elem_data) > 3 else None
+            # Figure bboxes are accumulated with the page's /Rotate baked into
+            # the CTM (needed for image position matching), which leaves the
+            # coordinates in rotated display space — off-page / negative on a
+            # 90/270 page.  A /Figure /BBox must be in DEFAULT user space, so
+            # un-rotate here (single chokepoint feeding both the grouping merge
+            # and the /A build below).  rotate==0 is an identity no-op.
+            if fig_bbox:
+                fig_bbox = _unrotate_bbox_for_page(fig_bbox, pdf.pages[page_idx])
             # elem_data[4] is overloaded by tuple type: annot_obj for /Link,
             # source-/Figure id for /Figure.  Disambiguate explicitly.
             annot_obj = (elem_data[4]
