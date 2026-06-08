@@ -1186,6 +1186,13 @@ def _fix_fonts(pdf: pikepdf.Pdf):
                 # font is Type0/CID (uses its own CMap), or if already present.
                 if not has_tounicode and _is_simple_winansi(encoding_obj):
                     _add_tounicode_cmap(pdf, font_obj)
+                elif not has_tounicode and font_type == "/Type0":
+                    # Embedded Type0/CID fonts (e.g. an Identity-H Wingdings
+                    # bullet subset) carry no ToUnicode, so PAC reports
+                    # "characters cannot be mapped to Unicode".  Synthesise one
+                    # from the font program (or, for symbol/dingbat families
+                    # with no usable cmap, map the decorative glyphs to U+2022).
+                    _add_type0_tounicode_cmap(pdf, font_obj)
 
                 if not embedded:
                     _try_embed_font(pdf, font_obj, base_font)
@@ -1261,6 +1268,156 @@ def _generate_winansi_tounicode() -> str:
             lines.append(f"<{byte_code:02X}> <{unicode_val:04X}>")
         lines.append("endbfchar")
 
+    lines.extend([
+        "endcmap",
+        "CMapName currentdict /CMap defineresource pop",
+        "end",
+        "end",
+    ])
+    return "\n".join(lines)
+
+
+# Symbol / dingbat families whose glyphs are decorative (typically list
+# bullets in these case PDFs).  When the embedded program exposes no usable
+# Unicode, map the used CIDs to U+2022 so they are still "mappable".
+_SYMBOL_FONT_FAMILIES = (
+    "wingdings", "webdings", "symbol", "zapfdingbats", "dingbats", "marlett",
+)
+_BULLET_UNICODE = 0x2022
+
+
+def _add_type0_tounicode_cmap(pdf: pikepdf.Pdf, font_obj) -> bool:
+    """Synthesize and attach a ToUnicode CMap for an embedded Type0 font.
+
+    Returns True if a CMap was attached.  The mapping is built, in order of
+    preference, from: the embedded font program's own cmap, meaningful
+    ``uniXXXX`` glyph names, and finally — for known symbol/dingbat families
+    that expose neither — a decorative-bullet fallback so the glyphs are at
+    least mappable (clears PAC "cannot be mapped to Unicode").
+    """
+    code_to_uni = _build_type0_tounicode_map(font_obj)
+    if not code_to_uni:
+        return False
+    cmap_str = _generate_type0_tounicode(code_to_uni)
+    cmap_stream = pikepdf.Stream(pdf, cmap_str.encode("latin-1"))
+    font_obj[pikepdf.Name("/ToUnicode")] = cmap_stream
+    return True
+
+
+def _build_type0_tounicode_map(font_obj) -> dict:
+    """Return a {2-byte CID code -> Unicode codepoint} map for a Type0 font.
+
+    Assumes Identity-H encoding with an Identity CIDToGIDMap (the common
+    InDesign/Word case), so character code == CID == GID.
+    """
+    base_font = str(font_obj.get("/BaseFont", "")).lstrip("/")
+    family = base_font.split("+", 1)[-1].lower()
+    is_symbol = any(s in family for s in _SYMBOL_FONT_FAMILIES)
+
+    descendants = font_obj.get("/DescendantFonts")
+    if not descendants:
+        return {}
+    desc_font = descendants[0]
+    fd = desc_font.get("/FontDescriptor")
+    if not fd:
+        return {}
+
+    font_bytes = None
+    for k in ("/FontFile2", "/FontFile3", "/FontFile"):
+        if k in fd:
+            try:
+                font_bytes = bytes(fd[k].read_bytes())
+            except Exception:
+                font_bytes = None
+            break
+    if font_bytes is None:
+        return {}
+
+    try:
+        import io
+        from fontTools.ttLib import TTFont
+        tt = TTFont(io.BytesIO(font_bytes), fontNumber=0, lazy=True)
+    except Exception as e:
+        logger.debug("Type0 ToUnicode: could not parse font program: %s", e)
+        return {}
+
+    num_glyphs = 0
+    try:
+        num_glyphs = int(tt["maxp"].numGlyphs)
+    except Exception:
+        try:
+            num_glyphs = len(tt.getGlyphOrder())
+        except Exception:
+            num_glyphs = 0
+
+    code_to_uni: dict = {}
+
+    # 1. Invert the embedded cmap (Unicode -> glyph) into GID -> Unicode.
+    try:
+        if "cmap" in tt:
+            best = tt.getBestCmap()
+            if best:
+                name_to_gid = tt.getReverseGlyphMap()
+                for uni, gname in best.items():
+                    gid = name_to_gid.get(gname)
+                    if gid is not None and 0 < uni != 0xFFFF:
+                        # Keep the lowest Unicode if several map to one GID.
+                        if gid not in code_to_uni or uni < code_to_uni[gid]:
+                            code_to_uni[gid] = uni
+    except Exception as e:
+        logger.debug("Type0 ToUnicode: cmap inversion failed: %s", e)
+
+    # 2. Meaningful uniXXXX / uXXXXX glyph names.
+    if not code_to_uni:
+        try:
+            for gid, gname in enumerate(tt.getGlyphOrder()):
+                uni = _glyph_name_to_unicode(gname)
+                if uni is not None:
+                    code_to_uni[gid] = uni
+        except Exception:
+            pass
+
+    # 3. Symbol/dingbat fallback: decorative glyphs -> bullet.
+    if not code_to_uni and is_symbol and num_glyphs:
+        for gid in range(1, num_glyphs):  # skip .notdef (GID 0)
+            code_to_uni[gid] = _BULLET_UNICODE
+
+    return code_to_uni
+
+
+def _glyph_name_to_unicode(gname: str):
+    """Parse a ``uniXXXX`` / ``uXXXXX`` glyph name into a codepoint, or None."""
+    try:
+        if gname.startswith("uni") and len(gname) >= 7:
+            return int(gname[3:7], 16)
+        if gname.startswith("u") and 5 <= len(gname) <= 7:
+            return int(gname[1:], 16)
+    except ValueError:
+        return None
+    return None
+
+
+def _generate_type0_tounicode(code_to_uni: dict) -> str:
+    """Build a 2-byte (Type0/Identity) ToUnicode CMap from a code->unicode map."""
+    entries = sorted((c, u) for c, u in code_to_uni.items()
+                     if 0 <= c <= 0xFFFF and u and u != 0xFFFF)
+    lines = [
+        "/CIDInit /ProcSet findresource begin",
+        "12 dict begin",
+        "begincmap",
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def",
+        "/CMapName /Adobe-Identity-UCS def",
+        "/CMapType 2 def",
+        "1 begincodespacerange",
+        "<0000> <FFFF>",
+        "endcodespacerange",
+    ]
+    for i in range(0, len(entries), 100):
+        chunk = entries[i:i + 100]
+        lines.append(f"{len(chunk)} beginbfchar")
+        for code, uni in chunk:
+            lines.append(f"<{code:04X}> <{uni:04X}>")
+        lines.append("endbfchar")
     lines.extend([
         "endcmap",
         "CMapName currentdict /CMap defineresource pop",
