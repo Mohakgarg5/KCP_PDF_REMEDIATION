@@ -310,6 +310,12 @@ def _tag_page(pdf, page, page_content: Optional[PageContent],
     # /Figure StructElem with N /MCRs instead of N separate Figures.
     struct_elems = _cluster_vector_figures(struct_elems, page_idx)
 
+    # Collapse /Figure SEs that share identical descriptive alt on this page
+    # (one logical figure placed more than once → source-region copy + block
+    # image/form-Do copy) into a single StructElem so screen readers announce
+    # it once instead of doubling it up.
+    struct_elems = _merge_duplicate_alt_figures(struct_elems, page_idx)
+
     new_stream_data = pikepdf.unparse_content_stream(new_ops)
     page.Contents = pikepdf.Stream(pdf, new_stream_data)
     page[pikepdf.Name.StructParents] = page_idx
@@ -436,10 +442,18 @@ def _strip_markers_with_source_intent(raw_ops: list,
             if tag == "/Artifact":
                 bdc_stack.append(("artifact", None))
                 artifact_depth += 1
-            elif tag == "/Figure":
-                # Pull the MCID out of the BDC properties dict so we can
-                # cross-reference against source_figure_alts.  BMC has no
-                # properties dict; treat as untracked.
+            else:
+                # Figure membership is decided by the source STRUCT TREE —
+                # surfaced as {MCID: (fid, alt)} in source_figure_alts — NOT by
+                # the content-stream BDC tag name.  Word / InDesign exports
+                # routinely mark figure content with /Shape, /InlineShape, even
+                # /P while the struct-tree element is /Figure; keying off the
+                # literal "/Figure" tag silently dropped those whole figures
+                # (Ariba HRMS/ERP flow chart, A&D performance curve, pure-vector
+                # iTunes slides).  Match on MCID instead so any tag carrying a
+                # known source-figure MCID is preserved.  Only the OUTERMOST
+                # mapped BDC opens a region — a mapped MCID nested inside an
+                # already-open figure is just more of that same figure.
                 mcid = None
                 if s == "BDC" and len(operands) >= 2:
                     try:
@@ -452,14 +466,22 @@ def _strip_markers_with_source_intent(raw_ops: list,
                         mcid = None
                 entry = (source_figure_alts.get(mcid)
                          if mcid is not None else None)
-                if entry is not None:
+                if entry is not None and not figure_open_stack:
                     fid, alt = entry
-                    figure_open_stack.append((len(out_ops), alt, fid))
-                    bdc_stack.append(("figure", mcid))
+                    # Tag-agnostic preservation applies when the source figure
+                    # carries a real description.  An empty-alt source figure is
+                    # only honoured when the content tag is *literally* /Figure
+                    # (historical behaviour); otherwise alt-less chrome the
+                    # author wrapped in a /Shape or /P tag (KEL137 Keurig
+                    # page-13 logo) would be promoted to a useless generic
+                    # "Figure".
+                    if alt or tag == "/Figure":
+                        figure_open_stack.append((len(out_ops), alt, fid))
+                        bdc_stack.append(("figure", mcid))
+                    else:
+                        bdc_stack.append(("other", None))
                 else:
                     bdc_stack.append(("other", None))
-            else:
-                bdc_stack.append(("other", None))
             continue
         if s == "EMC":
             if bdc_stack:
@@ -840,6 +862,68 @@ def _cluster_vector_figures(
         for tuple_idx in cluster["members"]:
             t = out[tuple_idx]
             out[tuple_idx] = (t[0], t[1], t[2], t[3], synth_id) + tuple(t[5:])
+    return out
+
+
+def _merge_duplicate_alt_figures(struct_elems: list, page_idx: int) -> list:
+    """Collapse /Figure SEs that share identical descriptive alt on one page.
+
+    A logical figure whose image/form XObject is placed more than once on a
+    page gets tagged twice: once via the authoritative source-/Figure region
+    path (5-tuple carrying a source id) and again via the image/form-``Do``
+    block path (4-tuple, no id), because the extra placement sits OUTSIDE the
+    source /Figure BDC range (a stray ``Do``, or a /Figure BDC whose MCID is
+    absent from the struct tree).  The block copy inherits the SAME alt that
+    was propagated from the source figure, so a screen reader announces the
+    identical description twice — Charlotte's "images doubling up with
+    captions" (AirFrance "Airline Revenue" graph, Reawakening "Retrofit
+    Project Timeline").
+
+    Within a single page two /Figure SEs carrying the same *descriptive* alt
+    are a duplication, not two distinct exhibits (distinct exhibits get
+    distinct descriptions).  Assign every member of such an alt-group a shared
+    grouping id — reusing the source id when one is present — so
+    ``_build_structure_tree`` collapses them into ONE StructElem with a unioned
+    /BBox and multiple /MCRs.  Merging (not dropping) keeps every placement's
+    marked content reachable while announcing the figure exactly once.
+
+    Generic alts ("", "Figure", "Image") are left untouched — they carry no
+    descriptive identity and may legitimately recur.
+    """
+    def _norm(alt) -> str:
+        return (alt or "").replace("\x00", "").strip().lower()
+
+    generic = {"", "figure", "image"}
+    groups: dict = {}
+    for i, t in enumerate(struct_elems):
+        if len(t) >= 4 and t[1] == "/Figure":
+            key = _norm(t[2])
+            if key in generic:
+                continue
+            groups.setdefault(key, []).append(i)
+
+    if not any(len(idxs) > 1 for idxs in groups.values()):
+        return struct_elems
+
+    out = list(struct_elems)
+    for key, idxs in groups.items():
+        if len(idxs) < 2:
+            continue
+        # Prefer an existing source-/Figure id so the merged StructElem keeps
+        # the author's grouping; otherwise synthesise one that never collides
+        # with integer source ids or the vec-cluster tuples.
+        gid = None
+        for i in idxs:
+            t = out[i]
+            if len(t) >= 5 and t[4] is not None:
+                gid = t[4]
+                break
+        if gid is None:
+            gid = ("alt-dup", page_idx, idxs[0])
+        for i in idxs:
+            t = out[i]
+            bbox = t[3] if len(t) > 3 else None
+            out[i] = (t[0], t[1], t[2], bbox, gid)
     return out
 
 
