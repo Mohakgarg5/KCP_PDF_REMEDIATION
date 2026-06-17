@@ -945,6 +945,103 @@ def _region_is_source_artifact(start: int, end: int, mask: list) -> bool:
     return hits * 2 >= span  # >= 50% of the region inside a source /Artifact
 
 
+def _region_inside_table(region_bbox, cell_rects, min_coverage: float = 0.6) -> bool:
+    """True if ``region_bbox`` lies substantially within the table cells.
+
+    Auto vector-figure detection promotes any run of path operators to a
+    /Figure so charts drawn as raw paths reach screen readers.  But the same
+    heuristic fires on *decorative cell fills* — blank-cell shading, the blue
+    "fill-in" boxes B&K draws in its tables, a red circle inside an Ariba
+    cell, the colour bands of a sensitivity table.  Those are table
+    decoration, not exhibits, and Katharine wants them gone.
+
+    ``cell_rects`` is the list of (x0, y0, x1, y1) bounding boxes of the page's
+    /TD and /TH cells.  We sum the area of the region covered by those cells
+    (cells on a page do not overlap, so summing intersections does not double
+    count) and compare it to the region's own area.  When the covered fraction
+    reaches ``min_coverage`` the region is decoration sitting inside the table
+    and the caller drops it so the vector ops fall through to /Artifact.
+
+    A standalone chart in the document body overlaps no cells (fraction 0) and
+    is kept; a fill covering one cell or the whole grid reaches ~1.0.
+    """
+    if not region_bbox or len(region_bbox) < 4 or not cell_rects:
+        return False
+    rx0, ry0, rx1, ry1 = (
+        min(region_bbox[0], region_bbox[2]),
+        min(region_bbox[1], region_bbox[3]),
+        max(region_bbox[0], region_bbox[2]),
+        max(region_bbox[1], region_bbox[3]),
+    )
+    region_area = (rx1 - rx0) * (ry1 - ry0)
+    if region_area <= 0:
+        return False
+    covered = 0.0
+    for c in cell_rects:
+        if not c or len(c) < 4:
+            continue
+        ix0 = max(rx0, min(c[0], c[2]))
+        iy0 = max(ry0, min(c[1], c[3]))
+        ix1 = min(rx1, max(c[0], c[2]))
+        iy1 = min(ry1, max(c[1], c[3]))
+        iw = ix1 - ix0
+        ih = iy1 - iy0
+        if iw > 0 and ih > 0:
+            covered += iw * ih
+    return (covered / region_area) >= min_coverage
+
+
+_FILLBOX_MIN_SIDE = 40.0  # pt; thinner than this in either axis = a box/band
+
+
+def _region_is_fill_box(ops: list, start: int, end: int, bbox=None) -> bool:
+    """True if a vector region is a solid-filled box / band — decoration, not a
+    chart.
+
+    B&K draws "fill-in" answer boxes (and colour-coded cell shading) as a clip
+    plus a filled rectangle — sometimes ``re re ... f``, sometimes the same
+    rectangle traced with line segments ``m l l l h f``.  Either way it is a
+    single filled shape with no curves.  Two independent signals mark it as
+    decoration the auto vector-figure pass over-promoted to /Figure:
+
+      * **Rectangles only** — the drawn geometry is ``re`` plus fill with no
+        line or curve operators at all (a pure colour panel of any size); or
+      * **Thin filled shape** — it has a fill, no curves, and its bbox is
+        thin in at least one axis (< ``_FILLBOX_MIN_SIDE`` pt): a fill-in box,
+        rule band or cell-shading strip.  Real exhibits (line/pie/flow charts)
+        carry curves and are substantial in both axes, so they never match.
+
+    A fill operator must be present (a clip-only or stroke-only region is not a
+    box), and any curve (``c``/``v``/``y``) disqualifies the region outright.
+    """
+    end = min(end, len(ops) - 1)
+    if end < start:
+        return False
+    has_rect = has_fill = has_line = has_curve = False
+    for _, operator in ops[start:end + 1]:
+        s = str(operator)
+        if s in ("c", "v", "y"):
+            has_curve = True
+        elif s == "l":
+            has_line = True
+        elif s == "re":
+            has_rect = True
+        elif s in ("f", "F", "f*", "B", "b", "B*", "b*"):
+            has_fill = True
+        elif s in _TEXT_OPS or s in _XOBJECT_OPS:
+            return False
+    if has_curve or not has_fill:
+        return False
+    if has_rect and not has_line:
+        return True  # pure rectangle fill — a colour panel
+    # otherwise require thinness so a real (large) rectilinear drawing is kept
+    if bbox and len(bbox) >= 4:
+        w = abs(bbox[2] - bbox[0])
+        h = abs(bbox[3] - bbox[1])
+        return min(w, h) < _FILLBOX_MIN_SIDE
+    return False
+
+
 def _collect_link_annots(page) -> list:
     """Collect link annotations with their rects for position matching during tagging.
 
@@ -1126,6 +1223,69 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
             (s, e) for (s, e) in auto_regions
             if not _region_is_source_artifact(s, e, source_artifact_mask)
         ]
+    # Drop auto regions that are decorative fills sitting inside a table —
+    # blank-cell shading, B&K's blue "fill-in" boxes, an Ariba red circle, the
+    # colour bands of a sensitivity table.  These are table decoration, not
+    # exhibits; promoting them to /Figure is exactly the "blanks/shapes in
+    # tables read as figures" defect.  Dropped regions fall through to normal
+    # /Artifact handling.  Only auto regions are touched — authoritative
+    # source figures (charts, diagrams, screenshots) are never affected.
+    # Per-table *extent* rectangles (the union of each table's cell bboxes).
+    # Blank cells carry no text, so the extractor emits no /TD for them; using
+    # the extent rather than individual cells keeps a fill drawn over a blank
+    # header cell recognised as "inside the table".  Used both to drop auto
+    # vector regions and to artifact generic-alt image/form figures that are
+    # really cell decoration (Katharine's blue boxes, red circle, blank fills).
+    table_extents: dict = {}
+    for b in (blocks or []):
+        if b.get("struct_type") not in ("/TD", "/TH"):
+            continue
+        tid = b.get("table_idx")
+        bb = b["bbox"]
+        ext = table_extents.get(tid)
+        if ext is None:
+            table_extents[tid] = [bb.x0, bb.y0, bb.x1, bb.y1]
+        else:
+            ext[0] = min(ext[0], bb.x0)
+            ext[1] = min(ext[1], bb.y0)
+            ext[2] = max(ext[2], bb.x1)
+            ext[3] = max(ext[3], bb.y1)
+    table_extent_rects = list(table_extents.values())
+
+    def _generic_alt(a) -> bool:
+        return (a or "").replace("\x00", "").strip().lower() in ("", "figure", "image")
+
+    def _bbox_is_table_decoration(bbox, alt) -> bool:
+        # A figure that carries no real description AND sits inside a table is
+        # cell decoration, not an exhibit — artifact it.
+        return (table_extent_rects and _generic_alt(alt)
+                and _region_inside_table(bbox, table_extent_rects))
+
+    def _bbox_is_decorative_icon(bbox, alt) -> bool:
+        # An icon-sized image with no real description is a bullet / marker /
+        # decorative glyph, not an exhibit.  A generic-alt /Figure this small
+        # only adds a meaningless "Figure" to the reading order, so artifact it.
+        if not _generic_alt(alt) or not bbox or len(bbox) < 4:
+            return False
+        return max(abs(bbox[2] - bbox[0]), abs(bbox[3] - bbox[1])) <= 24.0
+
+    if auto_regions:
+        # Drop two kinds of over-promoted vector regions, both of which the
+        # auto pass wrongly turned into /Figure:
+        #   1. solid-fill rectangles (colour / "fill-in" boxes) anywhere — they
+        #      carry no describable content; and
+        #   2. any generic region sitting inside a table extent (blank-cell
+        #      shading, colour bands) when the page has a detected table.
+        # Both fall through to /Artifact.
+        kept_auto = []
+        for (s, e) in auto_regions:
+            rbb = _compute_region_bbox(ops, s, e)
+            if _region_is_fill_box(ops, s, e, rbb):
+                continue
+            if table_extent_rects and _region_inside_table(rbb, table_extent_rects):
+                continue
+            kept_auto.append((s, e))
+        auto_regions = kept_auto
     # Source /Figure BDC ranges are authoritative — they preserve the
     # author's intended grouping (one diagram = one Figure with its alt).
     # Drop any auto-detected region that overlaps a source range so the
@@ -1535,7 +1695,19 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
                     and alt_is_generic
                     and _is_ruling_chrome_bbox(figure_region_bbox)
                 )
-                if is_banner or is_full_page_chrome or is_ruling_chrome:
+                # Cell decoration: a generic-alt region sitting inside a table
+                # is a blank-cell fill / colour band / "fill-in" box, not an
+                # exhibit (Katharine: blue boxes, red circle, blanks "have gotta
+                # go").  This fires even for SOURCE-tagged regions — older
+                # exports tag those decorative shapes /Figure/Shape with no alt
+                # — because a real in-cell exhibit would carry descriptive alt.
+                is_table_decoration = (
+                    alt_is_generic
+                    and bool(table_extent_rects)
+                    and _region_inside_table(figure_region_bbox, table_extent_rects)
+                )
+                if (is_banner or is_full_page_chrome or is_ruling_chrome
+                        or is_table_decoration):
                     new_ops[figure_bdc_op_idx] = (
                         [pikepdf.Name("/Artifact"),
                          pikepdf.Dictionary({
@@ -1719,11 +1891,16 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
                     fig_bbox = [min(x0, x1), min(y0, y1),
                                 max(x0, x1), max(y0, y1)]
 
-                    if src_artifact or _is_banner_artifact(fig_bbox, page_box):
+                    if (src_artifact or _is_banner_artifact(fig_bbox, page_box)
+                            or _bbox_is_table_decoration(
+                                fig_bbox, blocks[img_idx].get("alt_text"))
+                            or _bbox_is_decorative_icon(
+                                fig_bbox, blocks[img_idx].get("alt_text"))):
                         # Source marked it decorative, OR it is a wide-and-short
-                        # / icon-sized image in the page-margin band: emit as
-                        # content-stream /Artifact so the logo doesn't end up as
-                        # a /Figure with generic alt.
+                        # / icon-sized image in the page-margin band, OR it is a
+                        # describe-less fill sitting inside a table: emit as
+                        # content-stream /Artifact so the logo / cell decoration
+                        # doesn't end up as a /Figure with generic alt.
                         _close_struct()
                         _close_artifact()
                         blocks[img_idx]["used"] = True
@@ -1785,11 +1962,18 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
                         page, xobj_name, form_bbox, page_box)
                 )
 
+                form_alt_candidate = (
+                    blocks[vec_idx].get("alt_text") if vec_idx is not None
+                    else "Figure"
+                )
                 if (src_artifact or full_page_chrome
-                        or _is_banner_artifact(form_bbox, page_box)):
-                    # Source marked it decorative, a full-page template, OR a
+                        or _is_banner_artifact(form_bbox, page_box)
+                        or _bbox_is_table_decoration(
+                            form_bbox, form_alt_candidate)):
+                    # Source marked it decorative, a full-page template, a
                     # header/footer logo / template-banner Form XObject by
-                    # shape: emit as content-stream /Artifact instead of
+                    # shape, OR a describe-less fill inside a table (B&K's blue
+                    # "fill-in" boxes): emit as content-stream /Artifact instead of
                     # /Figure so screen readers skip the page chrome.
                     # Strip the Form's OWN internal marked content first — a
                     # full-page background form can carry nested /Figure or
