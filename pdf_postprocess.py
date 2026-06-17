@@ -1427,6 +1427,50 @@ def _generate_type0_tounicode(code_to_uni: dict) -> str:
     return "\n".join(lines)
 
 
+def _reconcile_hmtx_to_widths(tt, font_obj):
+    """Rewrite the embedded TrueType program's hmtx advances to match the font
+    dictionary's /Widths array (PDF/UA clause 7.21.5).
+
+    Only meaningful for simple (non-CID) fonts that carry an explicit /Widths
+    array — those position glyphs by /Widths, so changing hmtx is invisible to
+    layout but makes the program agree with the dictionary.  A no-op when the
+    program already matches.  Each /Widths entry is in 1000-unit glyph space;
+    convert to the program's own units (unitsPerEm) before storing.
+    """
+    widths = font_obj.get("/Widths")
+    if widths is None:
+        return
+    try:
+        units_per_em = tt["head"].unitsPerEm
+        hmtx = tt["hmtx"]
+        cmap = tt.getBestCmap() or {}
+    except Exception:
+        return
+    if not cmap or units_per_em <= 0:
+        return
+    first_char = int(font_obj.get("/FirstChar", 0))
+    for i, w in enumerate(widths):
+        try:
+            wv = float(w)
+        except Exception:
+            continue
+        if wv <= 0:
+            continue  # 0/absent widths carry no constraint — leave the glyph
+        code = first_char + i
+        if code in _WIN1252_SPECIAL:
+            unicode_cp = _WIN1252_SPECIAL[code]
+        elif 0x20 <= code <= 0x7E or 0xA0 <= code <= 0xFF:
+            unicode_cp = code
+        else:
+            continue
+        gname = cmap.get(unicode_cp)
+        if not gname or gname not in hmtx.metrics:
+            continue
+        advance = int(round(wv * units_per_em / 1000.0))
+        _, lsb = hmtx.metrics[gname]
+        hmtx.metrics[gname] = (advance, lsb)
+
+
 def _try_embed_font(pdf: pikepdf.Pdf, font_obj, base_font: str):
     """Try to find and embed a system font file."""
     font_location = _find_system_font(base_font)
@@ -1500,6 +1544,16 @@ def _try_embed_font(pdf: pikepdf.Pdf, font_obj, base_font: str):
             head = tt["head"]
             os2 = tt["OS/2"]
             post = tt.get("post")
+
+        # Reconcile the embedded program's advances with the dict /Widths.
+        # The substitute we embed (e.g. Liberation Sans Bold for a non-embedded
+        # Arial,Bold) is only *approximately* metric-compatible: its real glyph
+        # advances differ from the Arial /Widths the document inherited, which
+        # trips veraPDF clause 7.21.5 (program width != dictionary width).
+        # Simple (non-CID) fonts position glyphs by /Widths and never by the
+        # program hmtx, so rewriting hmtx to match /Widths keeps the original
+        # layout while making the program self-consistent.
+        _reconcile_hmtx_to_widths(tt, font_obj)
 
         buf = BytesIO()
         tt.save(buf)
