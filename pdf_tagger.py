@@ -189,6 +189,13 @@ def _is_banner_artifact(bbox, page_box) -> bool:
     # Phase 4: widened icon-chrome rule (was bw <= 120).
     if bw <= 150 and bh <= 60:
         return True
+    # reversionfixes(8): single-page Kellogg title-page logo is squarer and
+    # taller than the footer logos (ATF_TN /Im0 measured 131.7 x 70.3, aspect
+    # 1.87) — it appears on ONE page so the cross-page pre-pass can't catch it.
+    # Still margin-band-gated and width-capped, so a real body chart that dips
+    # into the margin stays a Figure.
+    if bw <= 160 and bh <= 80:
+        return True
     return False
 
 
