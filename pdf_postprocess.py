@@ -1131,75 +1131,103 @@ def _resolve_page_resources(page):
 
 
 def _fix_fonts(pdf: pikepdf.Pdf):
-    """Fix all non-embedded fonts: add ToUnicode CMap and embed font data."""
+    """Fix all non-embedded fonts: add ToUnicode CMap and embed font data.
+
+    Walks page /Resources AND the resources of any Form XObject nested under
+    them, so fonts used only inside a placed drawing get embedded too — e.g.
+    KEL335's chemical-structure form (/Meta45,/Meta48) referencing a
+    non-embedded /Arial, which otherwise trips veraPDF clause 7.21.4.1.
+    """
     seen_objgen = set()
+    seen_forms = set()
 
-    for page in pdf.pages:
-        res = _resolve_page_resources(page)
-        if not res:
-            continue
-        font_dict = res.get("/Font")
+    def _process_font_dict(font_dict):
         if not font_dict:
-            continue
-
+            return
         for name, font_obj in font_dict.items():
             try:
                 objgen = font_obj.objgen
-                if objgen in seen_objgen:
-                    continue
-                seen_objgen.add(objgen)
+                # Direct (inline) font dicts report objgen (0,0); never use that
+                # as a dedup key or all but the first inline font are skipped.
+                if objgen != (0, 0):
+                    if objgen in seen_objgen:
+                        continue
+                    seen_objgen.add(objgen)
 
-                has_tounicode = "/ToUnicode" in font_obj
-                desc = font_obj.get("/FontDescriptor")
-                embedded = False
-                if desc:
-                    embedded = any(k in desc for k in
-                                   ["/FontFile", "/FontFile2", "/FontFile3"])
-
-                # For Type0 (CID) fonts, check DescendantFonts for descriptor
-                # and embedding status — Type0 wrappers don't have their own
-                # FontDescriptor; it lives on the CIDFont descendant.
-                font_type = str(font_obj.get("/Subtype", ""))
-                if font_type == "/Type0" and not embedded:
-                    descendants = font_obj.get("/DescendantFonts")
-                    if descendants:
-                        for desc_font in descendants:
-                            d = desc_font.get("/FontDescriptor")
-                            if d and any(k in d for k in
-                                         ["/FontFile", "/FontFile2",
-                                          "/FontFile3"]):
-                                embedded = True
-                                break
-
-                if has_tounicode and embedded:
-                    continue
-
-                encoding_obj = font_obj.get("/Encoding")
-                encoding = str(encoding_obj) if encoding_obj else ""
-                base_font_raw = str(font_obj.get("/BaseFont", "")).lstrip("/")
-                # Strip subset prefix like ABCDEF+
-                is_subset = "+" in base_font_raw
-                base_font = base_font_raw.split("+", 1)[1] if is_subset else base_font_raw
-
-                # Add ToUnicode CMap for simple WinAnsi fonts.
-                # Skip if encoding has /Differences (custom remapping) or if
-                # font is Type0/CID (uses its own CMap), or if already present.
-                if not has_tounicode and _is_simple_winansi(encoding_obj):
-                    _add_tounicode_cmap(pdf, font_obj)
-                elif not has_tounicode and font_type == "/Type0":
-                    # Embedded Type0/CID fonts (e.g. an Identity-H Wingdings
-                    # bullet subset) carry no ToUnicode, so PAC reports
-                    # "characters cannot be mapped to Unicode".  Synthesise one
-                    # from the font program (or, for symbol/dingbat families
-                    # with no usable cmap, map the decorative glyphs to U+2022).
-                    _add_type0_tounicode_cmap(pdf, font_obj)
-
-                if not embedded:
-                    _try_embed_font(pdf, font_obj, base_font)
-
+                _fix_one_font(pdf, font_obj)
             except Exception as e:
                 logger.warning("Font fix failed for '%s': %s", name, e)
                 continue
+
+    def _walk_resources(res):
+        if not res:
+            return
+        _process_font_dict(res.get("/Font"))
+        xobjs = res.get("/XObject")
+        for _, xo in (xobjs.items() if xobjs else []):
+            try:
+                if str(xo.get("/Subtype", "")) != "/Form":
+                    continue
+                gen = xo.objgen
+            except Exception:
+                continue
+            if gen != (0, 0):
+                if gen in seen_forms:
+                    continue
+                seen_forms.add(gen)
+            _walk_resources(xo.get("/Resources"))
+
+    for page in pdf.pages:
+        _walk_resources(_resolve_page_resources(page))
+
+
+def _fix_one_font(pdf: pikepdf.Pdf, font_obj):
+    """Add a ToUnicode CMap and embed the program for a single font dict."""
+    has_tounicode = "/ToUnicode" in font_obj
+    desc = font_obj.get("/FontDescriptor")
+    embedded = False
+    if desc:
+        embedded = any(k in desc for k in
+                       ["/FontFile", "/FontFile2", "/FontFile3"])
+
+    # For Type0 (CID) fonts, check DescendantFonts for descriptor
+    # and embedding status — Type0 wrappers don't have their own
+    # FontDescriptor; it lives on the CIDFont descendant.
+    font_type = str(font_obj.get("/Subtype", ""))
+    if font_type == "/Type0" and not embedded:
+        descendants = font_obj.get("/DescendantFonts")
+        if descendants:
+            for desc_font in descendants:
+                d = desc_font.get("/FontDescriptor")
+                if d and any(k in d for k in
+                             ["/FontFile", "/FontFile2", "/FontFile3"]):
+                    embedded = True
+                    break
+
+    if has_tounicode and embedded:
+        return
+
+    encoding_obj = font_obj.get("/Encoding")
+    base_font_raw = str(font_obj.get("/BaseFont", "")).lstrip("/")
+    # Strip subset prefix like ABCDEF+
+    is_subset = "+" in base_font_raw
+    base_font = base_font_raw.split("+", 1)[1] if is_subset else base_font_raw
+
+    # Add ToUnicode CMap for simple WinAnsi fonts.
+    # Skip if encoding has /Differences (custom remapping) or if
+    # font is Type0/CID (uses its own CMap), or if already present.
+    if not has_tounicode and _is_simple_winansi(encoding_obj):
+        _add_tounicode_cmap(pdf, font_obj)
+    elif not has_tounicode and font_type == "/Type0":
+        # Embedded Type0/CID fonts (e.g. an Identity-H Wingdings
+        # bullet subset) carry no ToUnicode, so PAC reports
+        # "characters cannot be mapped to Unicode".  Synthesise one
+        # from the font program (or, for symbol/dingbat families
+        # with no usable cmap, map the decorative glyphs to U+2022).
+        _add_type0_tounicode_cmap(pdf, font_obj)
+
+    if not embedded:
+        _try_embed_font(pdf, font_obj, base_font)
 
 
 def _is_simple_winansi(encoding_obj) -> bool:
