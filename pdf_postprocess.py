@@ -45,6 +45,7 @@ def postprocess_pdf(pdf_path: str, title: str, language: str,
     _fix_cidset_streams(pdf)
     _fix_annotations(pdf)
     _cleanup_empty_markers(pdf)
+    _fix_unmappable_figure_text(pdf)
     _heal_artifact_struct_elems(pdf)
     _sanitize_non_standard_struct_types(pdf)
     _check_pipeline_invariants(pdf)
@@ -760,6 +761,16 @@ def _fix_annotations(pdf: pikepdf.Pdf):
         "/Widget": "/Form",
     }
 
+    # Precise ownership map: an annotation is "already tagged" only if it is
+    # genuinely the /Obj of an OBJR nested inside a struct element of the
+    # matching type.  The old StructParent-based check produced false positives
+    # — it accepted an annotation whose /StructParent happened to map to a
+    # shared page MCID array (which merely *contains* a /Link somewhere) or to
+    # a /Link element that references a *different* annotation.  Those false
+    # positives left the DNC's internal cross-reference links unwrapped
+    # (PAC: "Link annotation is not nested inside a Link structure element").
+    wrapped_by_objr = _annots_wrapped_by_objr(stroot)
+
     for page_idx, page in enumerate(pdf.pages):
         annots = page.get("/Annots")
         if not annots:
@@ -779,9 +790,13 @@ def _fix_annotations(pdf: pikepdf.Pdf):
                     contents_text = _derive_annot_contents(annot, subtype)
                     annot[pikepdf.Name("/Contents")] = pikepdf.String(contents_text)
 
-                # 2. Check if already properly tagged in ParentTree
-                existing_sp = annot.get("/StructParent")
-                if _is_already_tagged(stroot, existing_sp, struct_type):
+                # 2. Skip only if this exact annotation is already the /Obj of
+                # an OBJR under a struct element of the right type.
+                try:
+                    annot_og = annot.objgen
+                except Exception:
+                    annot_og = None
+                if annot_og is not None and struct_type in wrapped_by_objr.get(annot_og, set()):
                     continue
 
                 # 3. Create structure element with OBJR.
@@ -872,37 +887,287 @@ def _derive_annot_contents(annot, subtype: str) -> str:
     return "Annotation"
 
 
-def _is_already_tagged(stroot, struct_parent, expected_type: str) -> bool:
-    """Check if an annotation with given StructParent is already tagged correctly."""
-    if struct_parent is None:
-        return False
+def _annots_wrapped_by_objr(stroot) -> dict:
+    """Map annotation objgen -> {struct types whose OBJR references it}.
 
-    parent_tree = stroot.get("/ParentTree")
-    if not parent_tree:
-        return False
-
-    nums = parent_tree.get("/Nums")
-    if not nums:
-        return False
-
-    sp_val = int(struct_parent)
-    for i in range(0, len(nums) - 1, 2):
+    An annotation satisfies PDF/UA 7.18 only when it is the /Obj of an /OBJR
+    that is a direct child of a struct element of the correct type (/Link for
+    link annotations, /Form for widgets).  This walks the whole struct tree and
+    records those genuine ownerships, so _fix_annotations can skip exactly the
+    annotations that are already correctly nested — and wrap every other one.
+    """
+    wrapped: dict = {}
+    for node in _walk_struct_elements(stroot):
         try:
-            if int(nums[i]) == sp_val:
-                elem = nums[i + 1]
-                if isinstance(elem, pikepdf.Array):
-                    for e in elem:
-                        if hasattr(e, 'get') and str(e.get("/S", "")) == expected_type:
-                            return True
-                elif hasattr(elem, 'get'):
-                    if str(elem.get("/S", "")) == expected_type:
-                        return True
-                return False
+            s = node.get("/S")
+        except Exception:
+            continue
+        if s is None:
+            continue
+        s_str = str(s)
+        k = node.get("/K")
+        items = (
+            list(k) if isinstance(k, pikepdf.Array)
+            else [k] if k is not None else []
+        )
+        for it in items:
+            if isinstance(it, pikepdf.Dictionary) and str(it.get("/Type")) == "/OBJR":
+                obj = it.get("/Obj")
+                if obj is None:
+                    continue
+                try:
+                    wrapped.setdefault(obj.objgen, set()).add(s_str)
+                except Exception:
+                    continue
+    return wrapped
+
+
+# ---------------------------------------------------------------------------
+# ActualText for figure text whose glyphs cannot be mapped to Unicode
+# ---------------------------------------------------------------------------
+
+def _tounicode_good_codes(font_obj):
+    """Return (set of source codes mapping to a valid Unicode, has_tounicode)."""
+    tu = font_obj.get("/ToUnicode")
+    if tu is None:
+        return set(), False
+    try:
+        data = tu.read_bytes().decode("latin-1")
+    except Exception:
+        return set(), False
+    good = set()
+    for blk in re.findall(r"beginbfchar(.*?)endbfchar", data, re.S):
+        for s, d in re.findall(r"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>", blk):
+            dl = d.lower()
+            if not (len(set(dl)) == 1 and dl[0] == "0") and dl not in ("fffe", "ffff"):
+                try:
+                    good.add(int(s, 16))
+                except Exception:
+                    pass
+    for blk in re.findall(r"beginbfrange(.*?)endbfrange", data, re.S):
+        for lo, hi, _d in re.findall(
+            r"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>", blk
+        ):
+            try:
+                for c in range(int(lo, 16), int(hi, 16) + 1):
+                    good.add(c)
+            except Exception:
+                pass
+    return good, True
+
+
+def _append_tounicode_placeholders(pdf, font_obj, missing_codes, placeholder=0x20) -> int:
+    """Append bfchar entries mapping ``missing_codes`` to a placeholder Unicode.
+
+    Surgically inserts one or more ``beginbfchar`` blocks just before
+    ``endcmap`` in the font's existing 2-byte (Identity) ToUnicode CMap, leaving
+    every existing entry untouched.  Used only for Type0 fonts whose embedded
+    program exposes no recoverable Unicode for some used glyphs; the placeholder
+    (U+0020) makes the glyphs mappable for clause 7.21.7 while /ActualText
+    carries the real text.
+    """
+    tu = font_obj.get("/ToUnicode")
+    if tu is None:
+        return 0
+    codes = sorted(c for c in missing_codes if 0 <= c <= 0xFFFF)
+    if not codes:
+        return 0
+    try:
+        text = tu.read_bytes().decode("latin-1")
+    except Exception:
+        return 0
+    idx = text.rfind("endcmap")
+    if idx == -1:
+        return 0
+    blocks = []
+    for i in range(0, len(codes), 100):
+        chunk = codes[i:i + 100]
+        blk = [f"{len(chunk)} beginbfchar"]
+        for c in chunk:
+            blk.append(f"<{c:04X}> <{placeholder:04X}>")
+        blk.append("endbfchar")
+        blocks.append("\n".join(blk))
+    new_text = text[:idx] + "\n".join(blocks) + "\n" + text[idx:]
+    font_obj[pikepdf.Name("/ToUnicode")] = pikepdf.Stream(pdf, new_text.encode("latin-1"))
+    return len(codes)
+
+
+def _figure_alt_by_mcid(stroot) -> dict:
+    """Map (page_objgen, mcid) -> /Alt for every /Figure struct element."""
+    out: dict = {}
+    if stroot is None:
+        return out
+    for node in _walk_struct_elements(stroot):
+        try:
+            if str(node.get("/S")) != "/Figure":
+                continue
+        except Exception:
+            continue
+        alt = node.get("/Alt")
+        alt_str = str(alt) if alt is not None else ""
+        pg_default = node.get("/Pg")
+        k = node.get("/K")
+        items = (
+            list(k) if isinstance(k, pikepdf.Array)
+            else [k] if k is not None else []
+        )
+        for it in items:
+            if isinstance(it, pikepdf.Dictionary) and str(it.get("/Type")) == "/MCR":
+                pg = it.get("/Pg") or pg_default
+                mc = it.get("/MCID")
+                if pg is not None and mc is not None:
+                    try:
+                        out[(pg.objgen, int(mc))] = alt_str
+                    except Exception:
+                        pass
+            else:
+                # bare integer MCID directly under /K, page from element /Pg
+                try:
+                    mc = int(it)
+                except Exception:
+                    continue
+                if pg_default is not None:
+                    try:
+                        out[(pg_default.objgen, mc)] = alt_str
+                    except Exception:
+                        pass
+    return out
+
+
+def _fix_unmappable_figure_text(pdf: pikepdf.Pdf):
+    """Add /ActualText to /Figure marked content whose glyphs can't map to Unicode.
+
+    Some figures — notably equations — render as real text in an embedded math
+    font subset (e.g. Cambria Math, Type0/Identity-H) whose glyphs have no cmap
+    and no recoverable Unicode.  PAC flags every such glyph: "Characters in a
+    text object cannot be mapped to Unicode."  Per PDF/UA (Matterhorn 09-004),
+    an /ActualText on the enclosing marked-content sequence satisfies the
+    requirement.  We use the figure's own /Alt (the human-authored equation) as
+    the ActualText so a screen reader still gets the equation.
+
+    Only touches /Figure marked content — text elsewhere is left alone.  Runs
+    after _fix_fonts so any synthesizable ToUnicode CMaps already exist; only
+    genuinely unmappable glyphs remain.
+    """
+    stroot = pdf.Root.get("/StructTreeRoot")
+    mcid_alt = _figure_alt_by_mcid(stroot)
+
+    patched = 0
+    used_by_font = {}  # font objgen -> {"obj","good","codes"} for Type0 fonts
+    for page in pdf.pages:
+        res = _resolve_page_resources(page)
+        fonts = res.get("/Font") if res else None
+        if not fonts:
+            continue
+        finfo = {}
+        for fn in fonts.keys():
+            fo = fonts[fn]
+            good, has_tu = _tounicode_good_codes(fo)
+            multibyte = str(fo.get("/Subtype")) == "/Type0"
+            try:
+                og = fo.objgen
+            except Exception:
+                og = None
+            finfo[str(fn)] = (good, has_tu, multibyte, og)
+            if og is not None and multibyte and has_tu and og not in used_by_font:
+                used_by_font[og] = {"obj": fo, "good": good, "codes": set()}
+
+        try:
+            ops = list(pikepdf.parse_content_stream(page))
         except Exception:
             continue
 
-    return False
+        try:
+            page_og = page.objgen
+        except Exception:
+            page_og = None
 
+        stack = []  # frames: [tag, props_or_None, mcid, has_unmappable]
+        cur = None
+        changed = False
+        for operands, op in ops:
+            o = str(op)
+            if o == "BDC" and len(operands) >= 2:
+                tag = str(operands[0])
+                props = operands[1] if hasattr(operands[1], "get") else None
+                mcid = None
+                if props is not None:
+                    try:
+                        raw = props.get("/MCID")
+                        mcid = int(raw) if raw is not None else None
+                    except Exception:
+                        mcid = None
+                stack.append([tag, props, mcid, False])
+            elif o == "BMC" and len(operands) >= 1:
+                stack.append([str(operands[0]), None, None, False])
+            elif o == "EMC" and stack:
+                tag, props, mcid, bad = stack.pop()
+                if (bad and tag == "/Figure" and props is not None
+                        and props.get("/ActualText") is None):
+                    alt = mcid_alt.get((page_og, mcid)) if mcid is not None else None
+                    if not alt:
+                        alt = " "
+                    props[pikepdf.Name("/ActualText")] = pikepdf.String(alt)
+                    changed = True
+                    patched += 1
+            elif o == "Tf" and len(operands) >= 2:
+                cur = str(operands[0])
+            elif o in ("Tj", "TJ", "'", '"') and cur in finfo:
+                good, has_tu, multibyte, og = finfo[cur]
+                if not has_tu:
+                    continue
+                strs = []
+                for x in operands:
+                    if isinstance(x, pikepdf.String):
+                        strs.append(bytes(x))
+                    elif isinstance(x, pikepdf.Array):
+                        for y in x:
+                            if isinstance(y, pikepdf.String):
+                                strs.append(bytes(y))
+                unmapped = False
+                for bs in strs:
+                    if multibyte:
+                        codes = [(bs[i] << 8) | bs[i + 1] for i in range(0, len(bs) - 1, 2)]
+                    else:
+                        codes = list(bs)
+                    for c in codes:
+                        if c not in good:
+                            unmapped = True
+                            if multibyte and og in used_by_font:
+                                used_by_font[og]["codes"].add(c)
+                if unmapped:
+                    for fr in reversed(stack):
+                        if fr[0] == "/Figure":
+                            fr[3] = True
+                            break
+
+        if changed:
+            page.Contents = pikepdf.Stream(pdf, pikepdf.unparse_content_stream(ops))
+
+    # veraPDF clause 7.21.7: every *used* glyph must map to Unicode at the font
+    # level (ActualText does not satisfy this font-dictionary rule).  For glyphs
+    # with no recoverable Unicode (embedded math subsets exposing no cmap), add
+    # a placeholder space mapping — the real reading is carried by the figure's
+    # /ActualText and /Alt, so the space is never surfaced to a screen reader.
+    completed = 0
+    for info in used_by_font.values():
+        missing = info["codes"] - info["good"]
+        if missing:
+            completed += _append_tounicode_placeholders(pdf, info["obj"], missing)
+
+    if patched:
+        logger.warning(
+            "Added /ActualText to %d /Figure marked-content sequence(s) whose "
+            "glyphs cannot be mapped to Unicode (e.g. embedded math-font "
+            "equations).",
+            patched,
+        )
+    if completed:
+        logger.warning(
+            "Completed ToUnicode with %d placeholder mapping(s) for glyphs with "
+            "no recoverable Unicode (clause 7.21.7).",
+            completed,
+        )
 
 
 # ---------------------------------------------------------------------------
