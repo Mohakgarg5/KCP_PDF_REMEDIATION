@@ -785,8 +785,13 @@ def _fix_annotations(pdf: pikepdf.Pdf):
                 if not struct_type:
                     continue
 
-                # 1. Ensure /Contents key exists with descriptive text
-                if "/Contents" not in annot or not str(annot.get("/Contents", "")):
+                # 1. Ensure /Contents key exists with descriptive text.
+                # A whitespace-only value counts as empty: the new InDesign
+                # export writes /Contents = " " (a single space) on endnote
+                # back-reference links, which PAC flags as "'Contents' entry
+                # on an annotation exists, but is only comprised of whitespace."
+                # `.strip()` re-derives meaningful text for those too.
+                if "/Contents" not in annot or not str(annot.get("/Contents", "")).strip():
                     contents_text = _derive_annot_contents(annot, subtype)
                     annot[pikepdf.Name("/Contents")] = pikepdf.String(contents_text)
 
