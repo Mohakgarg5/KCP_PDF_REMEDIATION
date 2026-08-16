@@ -1997,7 +1997,11 @@ def _liberation_fallback(base_font: str):
     else:
         family = "Sans"
 
-    bold = "bold" in low
+    # "black"/"heavy" are weights above bold.  Liberation has no such face,
+    # so Bold is the closest available — mapping them to Regular (the old
+    # behaviour, since "black" does not contain "bold") dropped the weight
+    # entirely on the Liberation-only deploy.
+    bold = any(tok in low for tok in ("bold", "black", "heavy"))
     italic = "italic" in low or "oblique" in low
     if bold and italic:
         style = "-BoldItalic"
@@ -2041,10 +2045,19 @@ def _find_system_font(base_font: str):
     if spaced != clean:
         candidates.append(spaced + ".ttf")
         candidates.append(spaced + ".TTF")
-    # Try with hyphen variants
+    # Try with hyphen variants.  The style half must be offered BEFORE the
+    # bare family, or a face whose weight lives only in the suffix silently
+    # degrades to the family default: /Arial-Black has no _FONT_FILE_NAMES
+    # entry, so it fell straight through to "Arial.ttf" and embedded the
+    # regular weight while "Arial Black.ttf" sat unused in the same directory
+    # (Charlotte 2026-08-15, KEL072 CPEF (A)).
     for sep in ("-", ","):
         if sep in base_font:
-            family = base_font.split(sep)[0]
+            family, _, style = base_font.partition(sep)
+            style = style.strip()
+            if style:
+                candidates.append(f"{family} {style}.ttf")
+                candidates.append(f"{family} {style}.TTF")
             candidates.append(family + ".ttf")
             candidates.append(family + ".TTF")
 
