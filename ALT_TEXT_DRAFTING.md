@@ -28,10 +28,29 @@ vision path just reports `api_error` and leaves those figures blank.
 |---|---|---|
 | `ALT_TEXT_DRAFTING` | `1` | Master switch. `0` restores the previous behaviour exactly. |
 | `ALT_TEXT_USE_VISION` | `1` | `0` keeps drafting but **sends nothing to any API** — text-layer charts only. |
-| `ALT_TEXT_MODEL` | `claude-opus-5` | Model id. |
+| `ALT_TEXT_MODEL` | `claude-sonnet-5` | Model id. See the cost/accuracy table below. |
 | `ALT_TEXT_EFFORT` | `medium` | `low`/`medium`/`high`/`xhigh`/`max`. Raise for quality, lower for cost. |
 | `ALT_TEXT_RENDER_DPI` | `150` | Render resolution for the crop sent to the model. |
 | `ALT_TEXT_MAX_FIGURES_PER_DOC` | `60` | Spend guard. |
+
+## Model choice and cost
+
+Measured on KEL189 Exhibit 3 (a pie chart whose percentages are year-over-year
+GROWTH rates, not shares — a figure that is easy to misread):
+
+| Model | Facts correct | $/figure | $/20-figure case | ~6,000 figures |
+|---|---|---|---|---|
+| `claude-haiku-4-5` | **No** — named the wrong largest unit, read growth as share | $0.0020 | $0.04 | ~$12 |
+| `claude-sonnet-5` (default) | Yes | $0.0047 | $0.09 | ~$28 |
+| `claude-opus-5` | Yes, richest prose | $0.0137 | $0.27 | ~$82 |
+
+Haiku saves about five cents per case and in exchange states facts that are
+wrong, which the reviewer then has to catch. Sonnet is the default for that
+reason. Haiku remains one environment variable away if throughput matters more
+than accuracy on a particular batch.
+
+Note: Haiku 4.5 rejects `output_config.effort`, so the parameter is dropped
+automatically for models that do not accept it (`_supports_effort`).
 
 ## Reviewing quality
 

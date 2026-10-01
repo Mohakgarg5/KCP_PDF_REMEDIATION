@@ -264,6 +264,16 @@ class TestVisionPath(unittest.TestCase):
         self.assertIn("Alto 69%", prompt)
         self.assertIn("exact", prompt.lower())
 
+    def test_effort_is_dropped_for_models_that_reject_it(self):
+        # Haiku 4.5 returns 400 on output_config.effort — sending it anyway
+        # would turn every single figure into an API error.
+        client = FakeClient(_Resp("ok"))
+        A.draft_with_vision(b"x", self.CTX, client, "claude-haiku-4-5", "medium")
+        self.assertNotIn("output_config", client.messages.calls[0])
+        self.assertFalse(A._supports_effort("claude-haiku-4-5"))
+        self.assertTrue(A._supports_effort("claude-sonnet-5"))
+        self.assertTrue(A._supports_effort("claude-opus-5"))
+
     def test_decorative_is_left_blank(self):
         alt, reason, _ = self._call(_Resp("DECORATIVE"))
         self.assertIsNone(alt)

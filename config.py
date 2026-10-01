@@ -46,9 +46,9 @@ ALT_TEXT_DRAFTING = os.getenv("ALT_TEXT_DRAFTING", "1") not in ("0", "false", "F
 # text-layer-only path, which sends nothing anywhere.
 ALT_TEXT_USE_VISION = os.getenv("ALT_TEXT_USE_VISION", "1") not in ("0", "false", "False")
 
-ALT_TEXT_MODEL = os.getenv("ALT_TEXT_MODEL", "claude-opus-5")
-# low | medium | high | xhigh | max.  Describing a figure accurately is not a
-# trivial task, so this defaults to the model's own default rather than low.
+ALT_TEXT_MODEL = os.getenv("ALT_TEXT_MODEL", "claude-sonnet-5")
+# low | medium | high | xhigh | max.  Ignored on models that do not accept an
+# effort setting (Haiku 4.5 rejects it with a 400) — see _supports_effort.
 ALT_TEXT_EFFORT = os.getenv("ALT_TEXT_EFFORT", "medium")
 ALT_TEXT_RENDER_DPI = int(os.getenv("ALT_TEXT_RENDER_DPI", "150"))
 # Spend guard: a runaway document (KEL189 had 46 image tiles before grouping)

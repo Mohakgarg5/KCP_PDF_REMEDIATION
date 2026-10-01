@@ -387,6 +387,9 @@ discuss it in class.
 - State the trend or comparison the figure exists to show.
 - Do not begin with "Image of", "Graphic showing", or the figure's number — \
 the caption already supplies the number.
+- Do not repeat the caption verbatim, and do not restate the "Source:" note. \
+Both are real text on the page and are already read aloud; repeating them \
+makes the reader hear the same sentence twice.
 - No interpretation beyond what is visibly supported. Never invent a value.
 - Plain prose, no markdown, no bullet points.
 - 1-3 sentences for simple figures. Up to 6 for dense exhibits (tables, \
@@ -417,6 +420,16 @@ def _context_prompt(ctx: FigureContext) -> str:
     return "\n".join(bits) + "\n\nWrite the alt text."
 
 
+def _supports_effort(model: str) -> bool:
+    """Haiku 4.5 and the other pre-4.6 models reject output_config.effort.
+
+    Sending it anyway turns every figure into a 400, so the parameter is
+    dropped rather than letting the whole run fail on an unrelated knob.
+    """
+    m = (model or "").lower()
+    return not ("haiku" in m or "sonnet-4-5" in m or "sonnet-3" in m)
+
+
 def draft_with_vision(png: bytes, ctx: FigureContext, client,
                       model: str, effort: str) -> tuple:
     """Return (alt_text_or_None, reason). Never raises."""
@@ -436,7 +449,7 @@ def draft_with_vision(png: bytes, ctx: FigureContext, client,
                 ],
             }],
         )
-        if effort:
+        if effort and _supports_effort(model):
             kwargs["output_config"] = {"effort": effort}
         resp = client.messages.create(**kwargs)
     except Exception as e:
