@@ -13,13 +13,15 @@ import logging
 import sys
 import time
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pdf_extractor import extract_document
 from models import ElementType
 from pdf_tagger import tag_pdf
 from pdf_postprocess import postprocess_pdf
 from validator import validate_pdf, format_validation_report
+from alt_text_drafter import draft_alt_text, format_report as format_alt_text_report
+import config
 
 
 @dataclass
@@ -31,6 +33,8 @@ class PipelineResult:
     validation_report: str = ""
     error: str = ""
     duration_seconds: float = 0.0
+    alt_text_report: str = ""
+    alt_text_summary: dict = field(default_factory=dict)
 
 
 def process_single_pdf(input_path: str, output_dir: str, skip_validation: bool = False) -> PipelineResult:
@@ -82,6 +86,30 @@ def process_single_pdf(input_path: str, output_dir: str, skip_validation: bool =
         print(f"  [3/4] Post-processing metadata with pikepdf...")
         postprocess_pdf(str(output_path), doc_content.title, doc_content.language)
         print(f"        Metadata fixed: MarkInfo, Lang, ViewerPreferences, TabOrder, XMP")
+
+        # Stage 3b: Draft alt text for figures that have none.  Runs after the
+        # structure tree is final so it only reads /Figure elements and writes
+        # /Alt — no tagging logic is involved.  Figures that already carry an
+        # authored description are never touched.
+        if config.ALT_TEXT_DRAFTING:
+            print(f"  [3b ] Drafting alt text for undescribed figures...")
+            try:
+                report_path = str(output_path).rsplit(".pdf", 1)[0] + "_alt_text_report.json"
+                summary = draft_alt_text(
+                    str(output_path), input_path,
+                    doc_content=doc_content, report_path=report_path,
+                )
+                result.alt_text_summary = summary
+                result.alt_text_report = format_alt_text_report(summary)
+                print(f"        {summary['drafted']}/{summary['figures_needing_alt']} "
+                      f"drafted ({summary['deterministic']} from text layer, "
+                      f"{summary['vision']} from image), "
+                      f"{summary['left_blank']} left blank")
+            except Exception as e:
+                # Drafting must never break remediation — the PDF is already
+                # structurally correct and compliant at this point.
+                result.alt_text_report = f"Alt-text drafting failed: {type(e).__name__}: {e}"
+                print(f"        WARNING: {result.alt_text_report}")
 
         # Stage 4: Validate
         if skip_validation:

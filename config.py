@@ -1,6 +1,7 @@
 """
 config.py - Configuration constants for the PDF accessibility pipeline.
 """
+import os
 from pathlib import Path
 
 # Directories
@@ -32,3 +33,24 @@ VERAPDF_PROFILE = "ua1"
 
 # Image alt text placeholder
 DEFAULT_IMAGE_ALT = "Figure"
+
+# ---------------------------------------------------------------------------
+# Alt-text drafting (backend only — nothing in the Streamlit UI depends on it)
+# ---------------------------------------------------------------------------
+# Master switch. When off, the pipeline behaves exactly as it did before.
+ALT_TEXT_DRAFTING = os.getenv("ALT_TEXT_DRAFTING", "1") not in ("0", "false", "False")
+
+# Vision drafting sends a rendered image of each undescribed figure to the
+# Claude API.  Figures from unpublished cases therefore leave the machine.
+# Approved 2026-10-01.  Set ALT_TEXT_USE_VISION=0 to fall back to the
+# text-layer-only path, which sends nothing anywhere.
+ALT_TEXT_USE_VISION = os.getenv("ALT_TEXT_USE_VISION", "1") not in ("0", "false", "False")
+
+ALT_TEXT_MODEL = os.getenv("ALT_TEXT_MODEL", "claude-opus-5")
+# low | medium | high | xhigh | max.  Describing a figure accurately is not a
+# trivial task, so this defaults to the model's own default rather than low.
+ALT_TEXT_EFFORT = os.getenv("ALT_TEXT_EFFORT", "medium")
+ALT_TEXT_RENDER_DPI = int(os.getenv("ALT_TEXT_RENDER_DPI", "150"))
+# Spend guard: a runaway document (KEL189 had 46 image tiles before grouping)
+# should not fan out into hundreds of API calls.
+ALT_TEXT_MAX_FIGURES_PER_DOC = int(os.getenv("ALT_TEXT_MAX_FIGURES_PER_DOC", "60"))
