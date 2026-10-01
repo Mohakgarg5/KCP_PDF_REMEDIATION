@@ -149,18 +149,29 @@ def _parse_verapdf_json(
         total_passed = details.get("passedRules", 0)
         total_failed = details.get("failedRules", 0)
 
+        # veraPDF emits the per-rule breakdown as details["ruleSummaries"] with
+        # a "ruleStatus" field.  Older builds used details["rules"] with
+        # "status".  Reading only the legacy shape meant total_failed was
+        # reported while failed_rules stayed empty — the report said something
+        # failed but never which clause, which is the one thing it is for.
         failed_rules = []
-        for rule in details.get("rules", []):
-            if rule.get("status") == "failed":
-                checks = rule.get("checks", [])
-                context = checks[0].get("context", "") if checks else ""
-                failed_rules.append(ValidationRule(
-                    clause=rule.get("clause", ""),
-                    test_number=rule.get("testNumber", 0),
-                    description=rule.get("description", ""),
-                    status="failed",
-                    context=context[:200],
-                ))
+        for rule in details.get("ruleSummaries", []) + details.get("rules", []):
+            status = str(rule.get("ruleStatus", rule.get("status", ""))).lower()
+            if status not in ("failed", "fail"):
+                continue
+            checks = rule.get("checks") or []
+            context = ""
+            message = ""
+            if checks:
+                context = checks[0].get("context", "") or ""
+                message = checks[0].get("errorMessage", "") or ""
+            failed_rules.append(ValidationRule(
+                clause=rule.get("clause", ""),
+                test_number=rule.get("testNumber", 0),
+                description=rule.get("description", ""),
+                status="failed",
+                context=(f"{message} | {context}" if message else context)[:200],
+            ))
 
         return ValidationResult(
             pdf_path=pdf_path,

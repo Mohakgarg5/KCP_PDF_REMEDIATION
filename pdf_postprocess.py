@@ -961,6 +961,183 @@ def _tounicode_good_codes(font_obj):
     return good, True
 
 
+_SIMPLE_BASE_ENCODINGS = {
+    "/WinAnsiEncoding": "cp1252",
+    "/MacRomanEncoding": "mac_roman",
+    "/StandardEncoding": "latin-1",
+    "/PDFDocEncoding": "latin-1",
+}
+
+
+def _recover_simple_font_codes(font_obj, codes) -> dict:
+    """Best-effort {code -> unicode string} for a simple (1-byte) font.
+
+    Completing a ToUnicode gap with a space placeholder is only acceptable
+    when the real character genuinely cannot be recovered.  For most simple
+    fonts it can be, from one of three places, in order of trustworthiness:
+
+      1. /Encoding /Differences glyph names (``fontTools.agl`` resolves AGL
+         names, ``uniXXXX`` forms, and ligature names like ``f_i`` -> "fi");
+      2. the base encoding (/WinAnsiEncoding, /MacRomanEncoding, ...);
+      3. the embedded program's own cmap — code -> glyph name (symbolic
+         fonts map at 0xF000+code), then glyph name -> Unicode.
+
+    Returns only the codes it could resolve; the caller falls back to a
+    placeholder for the rest.
+    """
+    wanted = set(codes)
+    if not wanted:
+        return {}
+    out: dict = {}
+    try:
+        from fontTools import agl
+    except Exception:
+        agl = None
+
+    def _from_name(gname):
+        if not gname or agl is None:
+            return None
+        try:
+            s = agl.toUnicode(gname)
+        except Exception:
+            return None
+        if not s or all(ch == "\x00" for ch in s):
+            return None
+        return s
+
+    enc = font_obj.get("/Encoding")
+    base_name = None
+    differences = None
+    if enc is not None:
+        if isinstance(enc, pikepdf.Name):
+            base_name = str(enc)
+        elif hasattr(enc, "get"):
+            be = enc.get("/BaseEncoding")
+            base_name = str(be) if be is not None else None
+            differences = enc.get("/Differences")
+
+    # 1. /Differences glyph names.
+    if differences is not None:
+        try:
+            cur = 0
+            for item in differences:
+                if isinstance(item, (int, float)):
+                    cur = int(item)
+                    continue
+                gname = str(item).lstrip("/")
+                if cur in wanted and cur not in out:
+                    s = _from_name(gname)
+                    if s:
+                        out[cur] = s
+                cur += 1
+        except Exception:
+            pass
+
+    # 2. Base encoding.
+    codec = _SIMPLE_BASE_ENCODINGS.get(base_name or "")
+    if codec:
+        for c in wanted - set(out):
+            try:
+                s = bytes([c]).decode(codec)
+            except Exception:
+                continue
+            if s and s != "\x00":
+                out[c] = s
+
+    # 3. The embedded program's cmap.
+    remaining = wanted - set(out)
+    if remaining:
+        fd = font_obj.get("/FontDescriptor")
+        font_bytes = None
+        if fd is not None:
+            for k in ("/FontFile2", "/FontFile3", "/FontFile"):
+                if k in fd:
+                    try:
+                        font_bytes = bytes(fd[k].read_bytes())
+                    except Exception:
+                        font_bytes = None
+                    break
+        if font_bytes:
+            try:
+                import io
+                from fontTools.ttLib import TTFont
+                tt = TTFont(io.BytesIO(font_bytes), fontNumber=0, lazy=True)
+                code_to_name = {}
+                for sub in tt["cmap"].tables:
+                    for probe_base in (0x0000, 0xF000):
+                        for c in remaining:
+                            gname = sub.cmap.get(probe_base + c)
+                            if gname and c not in code_to_name:
+                                code_to_name[c] = gname
+                # Prefer a real Unicode cmap when the font has one.
+                name_to_uni = {}
+                try:
+                    for uni, gname in (tt.getBestCmap() or {}).items():
+                        if 0 < uni < 0xFFFE and gname not in name_to_uni:
+                            name_to_uni[gname] = chr(uni)
+                except Exception:
+                    pass
+                for c, gname in code_to_name.items():
+                    s = name_to_uni.get(gname) or _from_name(gname)
+                    if s:
+                        out[c] = s
+            except Exception as e:
+                logger.debug("simple-font ToUnicode recovery failed: %s", e)
+
+    return out
+
+
+def _append_tounicode_recovered(pdf, font_obj, code_to_text) -> int:
+    """Append real (possibly multi-character) bfchar mappings to a CMap."""
+    tu = font_obj.get("/ToUnicode")
+    if tu is None or not code_to_text:
+        return 0
+    try:
+        text = tu.read_bytes().decode("latin-1")
+    except Exception:
+        return 0
+    idx = text.rfind("endcmap")
+    if idx == -1:
+        return 0
+    width = _cmap_code_hex_digits(text)
+    items = sorted(code_to_text.items())
+    blocks = []
+    for i in range(0, len(items), 100):
+        chunk = items[i:i + 100]
+        blk = [f"{len(chunk)} beginbfchar"]
+        for c, s in chunk:
+            dst = "".join(f"{ord(ch):04X}" for ch in s)
+            blk.append(f"<{c:0{width}X}> <{dst}>")
+        blk.append("endbfchar")
+        blocks.append("\n".join(blk))
+    new_text = text[:idx] + "\n".join(blocks) + "\n" + text[idx:]
+    font_obj[pikepdf.Name("/ToUnicode")] = pikepdf.Stream(
+        pdf, new_text.encode("latin-1"))
+    return len(items)
+
+
+def _cmap_code_hex_digits(cmap_text: str) -> int:
+    """Hex-digit width of source codes in a ToUnicode CMap (2 for 1-byte).
+
+    A simple /TrueType or /Type1 font declares ``<00><FF>`` — a ONE-byte
+    codespace — so its bfchar source codes must be two hex digits.  Writing
+    the 2-byte ``<0028>`` form into such a CMap is malformed and the entry is
+    not honoured.  Type0/Identity fonts declare ``<0000><FFFF>`` and keep the
+    four-digit form.  Defaults to 4 when no codespacerange is present, which
+    preserves the historical Type0 behaviour.
+    """
+    m = re.search(
+        r"begincodespacerange(.*?)endcodespacerange", cmap_text or "", re.S
+    )
+    if not m:
+        return 4
+    first = re.search(r"<([0-9A-Fa-f]+)>", m.group(1))
+    if not first:
+        return 4
+    digits = len(first.group(1))
+    return 2 if digits <= 2 else 4
+
+
 def _append_tounicode_placeholders(pdf, font_obj, missing_codes, placeholder=0x20) -> int:
     """Append bfchar entries mapping ``missing_codes`` to a placeholder Unicode.
 
@@ -984,12 +1161,13 @@ def _append_tounicode_placeholders(pdf, font_obj, missing_codes, placeholder=0x2
     idx = text.rfind("endcmap")
     if idx == -1:
         return 0
+    width = _cmap_code_hex_digits(text)
     blocks = []
     for i in range(0, len(codes), 100):
         chunk = codes[i:i + 100]
         blk = [f"{len(chunk)} beginbfchar"]
         for c in chunk:
-            blk.append(f"<{c:04X}> <{placeholder:04X}>")
+            blk.append(f"<{c:0{width}X}> <{placeholder:04X}>")
         blk.append("endbfchar")
         blocks.append("\n".join(blk))
     new_text = text[:idx] + "\n".join(blocks) + "\n" + text[idx:]
@@ -1074,7 +1252,13 @@ def _fix_unmappable_figure_text(pdf: pikepdf.Pdf):
             except Exception:
                 og = None
             finfo[str(fn)] = (good, has_tu, multibyte, og)
-            if og is not None and multibyte and has_tu and og not in used_by_font:
+            # Simple (single-byte) fonts need completing too.  Word emits
+            # /TrueType subsets whose ToUnicode skips the ligature glyphs it
+            # synthesised — AUMC's AAAAAT+Calibri covers 33..92 except 40
+            # ("tt") and 59 ("ti") — and clause 7.21.7 fails on exactly those.
+            # Gating registration on Type0 meant such a font was never even
+            # considered.
+            if og is not None and has_tu and og not in used_by_font:
                 used_by_font[og] = {"obj": fo, "good": good, "codes": set()}
 
         try:
@@ -1138,7 +1322,7 @@ def _fix_unmappable_figure_text(pdf: pikepdf.Pdf):
                     for c in codes:
                         if c not in good:
                             unmapped = True
-                            if multibyte and og in used_by_font:
+                            if og in used_by_font:
                                 used_by_font[og]["codes"].add(c)
                 if unmapped:
                     for fr in reversed(stack):
@@ -1155,8 +1339,18 @@ def _fix_unmappable_figure_text(pdf: pikepdf.Pdf):
     # a placeholder space mapping — the real reading is carried by the figure's
     # /ActualText and /Alt, so the space is never surfaced to a screen reader.
     completed = 0
+    recovered_total = 0
     for info in used_by_font.values():
         missing = info["codes"] - info["good"]
+        if not missing:
+            continue
+        # Recover the real character wherever the font actually carries it;
+        # a space placeholder silently rewrites text, so it is a last resort.
+        recovered = _recover_simple_font_codes(info["obj"], missing)
+        if recovered:
+            recovered_total += _append_tounicode_recovered(
+                pdf, info["obj"], recovered)
+            missing = missing - set(recovered)
         if missing:
             completed += _append_tounicode_placeholders(pdf, info["obj"], missing)
 
@@ -1166,6 +1360,12 @@ def _fix_unmappable_figure_text(pdf: pikepdf.Pdf):
             "glyphs cannot be mapped to Unicode (e.g. embedded math-font "
             "equations).",
             patched,
+        )
+    if recovered_total:
+        logger.warning(
+            "Recovered %d real Unicode mapping(s) for used glyphs missing from "
+            "ToUnicode (clause 7.21.7).",
+            recovered_total,
         )
     if completed:
         logger.warning(
