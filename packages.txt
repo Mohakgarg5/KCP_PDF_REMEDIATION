@@ -1,1 +1,2 @@
 fonts-liberation
+poppler-utils

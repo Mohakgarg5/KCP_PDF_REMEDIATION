@@ -13,6 +13,28 @@ For every `/Figure` in the finished PDF:
 | Anything else | → rendered to PNG and described by Claude |
 | Photograph / logo / unreadable | → **left blank and flagged** in the report |
 
+## Deploying on Streamlit Community Cloud
+
+1. Point the app at branch **`deploy/alt-text-trial`**, main file `app.py`.
+2. In **Settings → Secrets**, add:
+
+   ```toml
+   ANTHROPIC_API_KEY = "sk-ant-..."
+   ```
+
+   Streamlit exposes secrets via `st.secrets`, not the process environment, so
+   `app.py` bridges them into `os.environ` before importing `config` — without
+   that bridge the SDK never sees the key.
+
+3. `packages.txt` already includes **`poppler-utils`**. That provides
+   `pdftoppm`, which renders each figure for the vision path. Without it every
+   raster figure is skipped with `render_failed`.
+
+Any of the switches below can also go in Secrets, e.g. `ALT_TEXT_MODEL`.
+
+Note: veraPDF needs Java and is not available on Streamlit Cloud, so the app
+does not validate there — same as before this change.
+
 ## Required at deploy time
 
 ```bash

@@ -13,9 +13,31 @@ from pathlib import Path
 
 import streamlit as st
 
+import os
+
+# Streamlit Cloud supplies secrets via st.secrets, not the process environment,
+# but the Anthropic SDK and config.py both read os.environ.  Bridge them before
+# importing config so ALT_TEXT_* / ANTHROPIC_API_KEY set in the Streamlit
+# dashboard actually take effect.
+def _bridge_secrets():
+    try:
+        import streamlit as _st
+        for key in ("ANTHROPIC_API_KEY", "ALT_TEXT_DRAFTING", "ALT_TEXT_USE_VISION",
+                    "ALT_TEXT_MODEL", "ALT_TEXT_EFFORT", "ALT_TEXT_RENDER_DPI",
+                    "ALT_TEXT_MAX_FIGURES_PER_DOC"):
+            if key not in os.environ and key in _st.secrets:
+                os.environ[key] = str(_st.secrets[key])
+    except Exception:
+        pass  # no secrets configured, or running outside Streamlit
+
+
+_bridge_secrets()
+
+import config
 from pdf_extractor import extract_document
 from pdf_tagger import tag_pdf
 from pdf_postprocess import postprocess_pdf
+from alt_text_drafter import draft_alt_text, format_report as format_alt_text_report
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s [%(name)s] %(message)s")
 
@@ -317,6 +339,20 @@ for idx, uploaded in enumerate(valid_files):
             progress_bar.progress(80, text="Stage 3/3 — Fixing metadata & fonts…")
             postprocess_pdf(str(output_path), doc.title, doc.language)
 
+            # Stage 3b — draft alt text for figures that have none.  Backend
+            # only: no new controls, no new panels.  The drafts land in the
+            # PDF's /Alt and the review report rides along in the download.
+            alt_summary, alt_report_text = None, None
+            if config.ALT_TEXT_DRAFTING:
+                progress_bar.progress(90, text="Stage 3b — Drafting figure descriptions…")
+                try:
+                    alt_summary = draft_alt_text(
+                        str(output_path), str(input_path), doc_content=doc)
+                    alt_report_text = format_alt_text_report(alt_summary)
+                except Exception as exc:
+                    # Never let drafting break a run — the PDF is already done.
+                    alt_report_text = f"Alt-text drafting failed: {type(exc).__name__}: {exc}"
+
             elapsed = time.time() - t0
             progress_bar.progress(100, text="Done ✓")
 
@@ -344,6 +380,16 @@ for idx, uploaded in enumerate(valid_files):
                 key=f"dl_{idx}",
                 use_container_width=True,
             )
+            if alt_report_text:
+                drafted = (alt_summary or {}).get("drafted", 0)
+                total = (alt_summary or {}).get("figures_needing_alt", 0)
+                with st.expander(
+                    f"Figure descriptions drafted — {drafted}/{total} "
+                    f"(review before publishing)", expanded=False):
+                    # wrap_lines, or long descriptions run off the right edge
+                    # and the reviewer cannot read the thing they came to judge.
+                    st.code(alt_report_text, language=None, wrap_lines=True)
+
             results.append({
                 "name": uploaded.name,
                 "out_name": output_path.name,
@@ -351,6 +397,8 @@ for idx, uploaded in enumerate(valid_files):
                 "bytes": pdf_bytes,
                 "pages": len(doc.pages),
                 "elapsed": elapsed,
+                "alt_report": alt_report_text,
+                "alt_summary": alt_summary,
             })
 
         except Exception as exc:
@@ -392,6 +440,13 @@ if len(results) > 1:
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for r in ok_results:
                 zf.writestr(r["out_name"], r["bytes"])
+                # Ship the drafting review alongside each PDF so the reviewer
+                # can read every description without opening Acrobat.
+                if r.get("alt_report"):
+                    zf.writestr(
+                        r["out_name"].rsplit(".pdf", 1)[0] + "_alt_text_review.txt",
+                        r["alt_report"],
+                    )
         buf.seek(0)
         st.download_button(
             label=f"⬇  Download All ({len(ok_results)} files) as ZIP",
