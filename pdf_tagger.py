@@ -317,6 +317,19 @@ def _tag_page(pdf, page, page_content: Optional[PageContent],
     # /Figure StructElem with N /MCRs instead of N separate Figures.
     struct_elems = _cluster_vector_figures(struct_elems, page_idx)
 
+    # Collapse a captioned exhibit emitted as a grid of image tiles into one
+    # /Figure, so the reviewer writes one description per picture rather than
+    # one per tile.  Live text inside the merged area vetoes the merge.
+    struct_elems = _cluster_tiled_image_figures(
+        struct_elems, page_idx,
+        [
+            [b["bbox"].x0, b["bbox"].y0, b["bbox"].x1, b["bbox"].y1]
+            for b in (blocks or [])
+            if b.get("struct_type") not in ("/Figure", None)
+            and not b.get("is_artifact")
+        ],
+    )
+
     # Collapse /Figure SEs that share identical descriptive alt on this page
     # (one logical figure placed more than once → source-region copy + block
     # image/form-Do copy) into a single StructElem so screen readers announce
@@ -637,6 +650,146 @@ def _merge_figure_regions(source_regions: list, auto_regions: list) -> list:
     return merged
 
 
+# Fraction of an auto-detected vector region that must lie on top of figures
+# we are already tagging before it is treated as decoration of those figures
+# rather than a figure in its own right.  A majority, so that a region merely
+# clipping the corner of a neighbouring image still stands on its own.
+_FIGURE_DECORATION_COVERAGE = 0.5
+
+
+def _rect_intersection(a, b):
+    """Intersection of two [x0, y0, x1, y1] rects, or None when disjoint."""
+    if not a or not b or len(a) < 4 or len(b) < 4:
+        return None
+    x0 = max(a[0], b[0])
+    y0 = max(a[1], b[1])
+    x1 = min(a[2], b[2])
+    y1 = min(a[3], b[3])
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return [x0, y0, x1, y1]
+
+
+def _union_area(rects: list) -> float:
+    """Exact area of a union of axis-aligned rects via coordinate compression.
+
+    Intersections against several figures routinely overlap each other (two
+    stacked slide images both clipped by one frame region), so summing their
+    areas would double-count.  The rect count here is small — one per figure
+    on a page — so the O(n^2) grid is cheap and avoids a sweep-line.
+    """
+    rects = [r for r in rects if r]
+    if not rects:
+        return 0.0
+    xs = sorted({v for r in rects for v in (r[0], r[2])})
+    ys = sorted({v for r in rects for v in (r[1], r[3])})
+    total = 0.0
+    for i in range(len(xs) - 1):
+        x0, x1 = xs[i], xs[i + 1]
+        for j in range(len(ys) - 1):
+            y0, y1 = ys[j], ys[j + 1]
+            for r in rects:
+                if r[0] <= x0 and r[2] >= x1 and r[1] <= y0 and r[3] >= y1:
+                    total += (x1 - x0) * (y1 - y0)
+                    break
+    return total
+
+
+def _auto_region_figure_overlap(region_bbox, figure_bboxes: list) -> float:
+    """Fraction of ``region_bbox`` covered by the union of ``figure_bboxes``.
+
+    An auto-detected vector region that sits mostly on top of a figure we are
+    already tagging is DECORATION of that figure — an Acrobat callout box or
+    text-box comment drawn over a photo, a pie chart's leader lines, the
+    frame around an exhibit's slides — not a figure in its own right.
+
+    ``_detect_vector_figure_regions`` cannot see this itself: it only accepts
+    q…Q blocks with ``do_count == 0``, so the image is invisible to it and
+    only the decoration's strokes are collected.  ``_merge_figure_regions``
+    could not see it either, because it compares *op-index* ranges and the
+    decoration is drawn in its own block, well away from the image's ``Do``.
+    Hence the geometric test here.
+    """
+    if not region_bbox or len(region_bbox) < 4 or not figure_bboxes:
+        return 0.0
+    area = ((region_bbox[2] - region_bbox[0])
+            * (region_bbox[3] - region_bbox[1]))
+    if area <= 0:
+        return 0.0
+    parts = [_rect_intersection(region_bbox, fb) for fb in figure_bboxes]
+    return _union_area([p for p in parts if p]) / area
+
+
+def _rect_gap(a, b) -> float:
+    """Edge-to-edge separation of two rects (0.0 when they touch or overlap)."""
+    dx = max(0.0, max(a[0], b[0]) - min(a[2], b[2]))
+    dy = max(0.0, max(a[1], b[1]) - min(a[3], b[3]))
+    return max(dx, dy)
+
+
+def _cluster_adjacent_image_figures(bboxes: list,
+                                    gap: float = 90.0) -> list:
+    """Group image bboxes into connected components by edge separation.
+
+    A captioned exhibit is routinely emitted as many image XObjects: HP's
+    "Figure 3: Millennium Development Goals" is 8 icons in a 4x2 grid,
+    KEL189's "Exhibit 4A: Marketing Organization Chart" is 46 tiles.  Tagging
+    each tile as its own /Figure hands the reviewer dozens of alt-text slots
+    for what is one picture.
+
+    Returns a list of index lists, each a cluster.
+    """
+    n = len(bboxes)
+    if n == 0:
+        return []
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[rj] = ri
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if _rect_gap(bboxes[i], bboxes[j]) <= gap:
+                union(i, j)
+    groups: dict = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+    return list(groups.values())
+
+
+def _mergeable_image_clusters(image_bboxes: list, text_bboxes: list,
+                              gap: float = 90.0) -> list:
+    """Union bboxes of image clusters that may safely collapse to one /Figure.
+
+    A cluster qualifies only when it holds at least two images AND no live
+    text block intersects the merged bbox.  That guard is essential: a
+    /Figure's alt text REPLACES its contents for a screen reader, so merging
+    across real text would silently delete it.  It is what keeps Nissan p8's
+    pie slice labels ("Nano 16%", "Alto 69%") readable.
+    """
+    out = []
+    for idxs in _cluster_adjacent_image_figures(image_bboxes, gap):
+        if len(idxs) < 2:
+            continue
+        members = [image_bboxes[i] for i in idxs]
+        merged = [
+            min(b[0] for b in members), min(b[1] for b in members),
+            max(b[2] for b in members), max(b[3] for b in members),
+        ]
+        if any(_rect_intersection(merged, tb) for tb in text_bboxes):
+            continue
+        out.append(merged)
+    return out
+
+
 def _bbox_matches_any(bbox, bbox_set, tol: float = 10.0) -> bool:
     """True if ``bbox`` is within ``tol`` pt of any 4-tuple in ``bbox_set``.
 
@@ -869,6 +1022,62 @@ def _cluster_vector_figures(
         for tuple_idx in cluster["members"]:
             t = out[tuple_idx]
             out[tuple_idx] = (t[0], t[1], t[2], t[3], synth_id) + tuple(t[5:])
+    return out
+
+
+def _cluster_tiled_image_figures(struct_elems: list, page_idx: int,
+                                 text_bboxes: list,
+                                 gap: float = 90.0) -> list:
+    """Collapse a captioned exhibit that was emitted as many image tiles.
+
+    ``_cluster_vector_figures`` cannot do this: it only considers tuples of
+    length >= 5 carrying an explicit ``source_fig_id`` slot, and the image /
+    form-``Do`` path emits 4-tuples.  So a picture drawn as a grid of image
+    XObjects — HP's "Figure 3: Millennium Development Goals" (8 icons),
+    KEL189's "Exhibit 4A: Marketing Organization Chart" (46 tiles) — became
+    one /Figure per tile, handing the reviewer dozens of alt-text slots for
+    what is a single picture.
+
+    Only generic-alt, ungrouped /Figure tuples are considered, so an authored
+    description is never disturbed.  A cluster merges ONLY when no live text
+    block falls inside its union bbox: a /Figure's alt REPLACES its contents
+    for a screen reader, so merging across real text would silently delete
+    it.  That guard is what keeps Nissan p8's pie slice labels ("Nano 16%",
+    "Alto 69%") out of a figure.
+    """
+    def _generic(alt) -> bool:
+        return (alt or "").replace("\x00", "").strip().lower() in (
+            "", "figure", "image")
+
+    candidates = []
+    for i, t in enumerate(struct_elems):
+        if (t[1] == "/Figure"
+                and _generic(t[2])
+                and t[3] is not None and len(t[3]) == 4
+                and (len(t) < 5 or t[4] is None)):
+            candidates.append((i, [float(v) for v in t[3]]))
+    if len(candidates) < 2:
+        return struct_elems
+
+    bboxes = [b for _i, b in candidates]
+    out = list(struct_elems)
+    for ci, idxs in enumerate(_cluster_adjacent_image_figures(bboxes, gap)):
+        if len(idxs) < 2:
+            continue
+        members = [bboxes[k] for k in idxs]
+        merged = [
+            min(b[0] for b in members), min(b[1] for b in members),
+            max(b[2] for b in members), max(b[3] for b in members),
+        ]
+        if any(_rect_intersection(merged, tb) for tb in text_bboxes):
+            continue
+        synth_id = ("tile-cluster", page_idx, ci)
+        for k in idxs:
+            tuple_idx = candidates[k][0]
+            t = out[tuple_idx]
+            out[tuple_idx] = (
+                (t[0], t[1], t[2], t[3], synth_id) + tuple(t[5:])
+            )
     return out
 
 
@@ -1284,12 +1493,34 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
         #   2. any generic region sitting inside a table extent (blank-cell
         #      shading, colour bands) when the page has a detected table.
         # Both fall through to /Artifact.
+        # 3. regions that sit on top of a figure we are ALREADY tagging.
+        #    Acrobat's callout / text-box comment overlays, a pie chart's
+        #    leader lines and an exhibit's slide frames are all drawn as
+        #    their own q…Q path blocks, physically over or around an image.
+        #    _detect_vector_figure_regions cannot see the image (it requires
+        #    do_count == 0) and the op-index test below cannot see it either
+        #    (the decoration is drawn far from the image's Do), so without a
+        #    geometric test each one becomes an extra generic-alt /Figure
+        #    overlapping the real one.
+        known_figure_bboxes = [
+            [b["bbox"].x0, b["bbox"].y0, b["bbox"].x1, b["bbox"].y1]
+            for b in (blocks or [])
+            if b.get("struct_type") == "/Figure" and not b.get("is_artifact")
+        ]
+        for s, e, _alt, _fid in (source_figure_regions or []):
+            sbb = _compute_region_bbox(ops, s, e)
+            if sbb:
+                known_figure_bboxes.append(sbb)
         kept_auto = []
         for (s, e) in auto_regions:
             rbb = _compute_region_bbox(ops, s, e)
             if _region_is_fill_box(ops, s, e, rbb):
                 continue
             if table_extent_rects and _region_inside_table(rbb, table_extent_rects):
+                continue
+            if (known_figure_bboxes
+                    and _auto_region_figure_overlap(
+                        rbb, known_figure_bboxes) >= _FIGURE_DECORATION_COVERAGE):
                 continue
             kept_auto.append((s, e))
         auto_regions = kept_auto
