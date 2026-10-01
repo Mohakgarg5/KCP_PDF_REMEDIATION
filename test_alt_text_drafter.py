@@ -57,14 +57,17 @@ class _Resp:
 
 class FakeMessages:
     def __init__(self, outcome):
+        # A list is treated as a script: one outcome per successive call.
+        self._script = list(outcome) if isinstance(outcome, list) else None
         self._outcome = outcome
         self.calls = []
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
-        if isinstance(self._outcome, Exception):
-            raise self._outcome
-        return self._outcome
+        out = self._script.pop(0) if self._script else self._outcome
+        if isinstance(out, Exception):
+            raise out
+        return out
 
 
 class FakeClient:
@@ -284,6 +287,22 @@ class TestVisionPath(unittest.TestCase):
         self.assertIsNone(alt)
         self.assertEqual(reason, "model_says_unclear")
 
+    def test_a_description_merely_starting_with_the_sentinel_is_kept(self):
+        # The sentinel must match exactly.  A prefix test discarded
+        # "Decorative border in school colours." as if it were a decline.
+        alt, reason, _ = self._call(
+            _Resp("Decorative border in school colours."))
+        self.assertEqual(alt, "Decorative border in school colours.")
+        self.assertIsNone(reason)
+        alt2, _r, _ = self._call(_Resp("Unclear photograph of a storefront."))
+        self.assertEqual(alt2, "Unclear photograph of a storefront.")
+
+    def test_bare_sentinel_still_declines(self):
+        for word in ("DECORATIVE", "decorative", "DECORATIVE."):
+            alt, reason, _ = self._call(_Resp(word))
+            self.assertIsNone(alt, word)
+            self.assertEqual(reason, "model_says_decorative")
+
     def test_refusal_is_left_blank(self):
         alt, reason, _ = self._call(_Resp("no", stop_reason="refusal"))
         self.assertIsNone(alt)
@@ -298,6 +317,51 @@ class TestVisionPath(unittest.TestCase):
         alt, reason, _ = self._call(RuntimeError("connection reset"))
         self.assertIsNone(alt)
         self.assertTrue(reason.startswith("api_error"))
+
+
+class TestDeclinedFiguresAreRetried(unittest.TestCase):
+    """Every figure should end up described — a bare "Figure" helps nobody."""
+
+    CTX = FigureContext(page=1, bbox=[0, 0, 400, 300], caption="Brand Range")
+
+    def _run(self, script):
+        import config
+        client = FakeClient(script)
+        old_v, old_m = config.ALT_TEXT_USE_VISION, config.ALT_TEXT_MODEL
+        config.ALT_TEXT_USE_VISION = True
+        try:
+            alt, reason = A.draft_with_vision(
+                b"x", self.CTX, client, "claude-sonnet-5", "medium")
+            if alt is None and reason in ("model_says_decorative",
+                                          "model_says_unclear"):
+                alt2, r2 = A.draft_with_vision(
+                    b"x", self.CTX, client, "claude-sonnet-5", "medium",
+                    system_prompt=A.FALLBACK_SYSTEM_PROMPT)
+                return alt2, r2, client
+            return alt, reason, client
+        finally:
+            config.ALT_TEXT_USE_VISION, config.ALT_TEXT_MODEL = old_v, old_m
+
+    def test_decorative_then_retry_produces_a_description(self):
+        alt, reason, client = self._run(
+            [_Resp("DECORATIVE"), _Resp("Decorative border in school colours.")])
+        self.assertEqual(alt, "Decorative border in school colours.")
+        self.assertIsNone(reason)
+        self.assertEqual(len(client.messages.calls), 2)
+
+    def test_the_retry_uses_the_prompt_that_cannot_decline(self):
+        _alt, _r, client = self._run([_Resp("UNCLEAR"), _Resp("Blurred chart.")])
+        second = client.messages.calls[1]["system"]
+        self.assertIn("must produce a description", second)
+        self.assertIn("Do not reply DECORATIVE or UNCLEAR", second)
+
+    def test_a_first_pass_success_does_not_retry(self):
+        _alt, _r, client = self._run([_Resp("Bar chart of revenue.")])
+        self.assertEqual(len(client.messages.calls), 1)
+
+    def test_fallback_prompt_forbids_the_escape_hatches(self):
+        self.assertNotIn("reply with exactly: DECORATIVE", A.FALLBACK_SYSTEM_PROMPT)
+        self.assertIn("must produce a description", A.FALLBACK_SYSTEM_PROMPT)
 
 
 # ---------------------------------------------------------------------------

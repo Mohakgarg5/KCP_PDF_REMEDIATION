@@ -401,6 +401,28 @@ exactly: UNCLEAR
 """
 
 
+# Used when the first pass replies DECORATIVE or UNCLEAR.  Every /Figure in
+# the reading order is announced to a screen reader, so one left with the
+# placeholder "Figure" is strictly worse than an imperfect description: the
+# reader is told something is there and given nothing.  This pass removes the
+# escape hatches and asks for whatever can honestly be seen.
+FALLBACK_SYSTEM_PROMPT = """\
+You write alt text for figures in Kellogg School of Management business case \
+studies, for students using screen readers.
+
+Describe what is visibly present in this image. Lead with the figure type, \
+then the content: shapes, labels, text, colours, layout, people, objects — \
+whatever is actually there.
+
+You must produce a description. Do not reply DECORATIVE or UNCLEAR. If the \
+image is a logo or ornament, say so plainly ("Decorative border in school \
+colours"). If it is blurry or low-resolution, describe what can still be made \
+out and say the detail is not legible.
+
+Plain prose, no markdown, 1-3 sentences. Never invent a value you cannot read.
+"""
+
+
 def _context_prompt(ctx: FigureContext) -> str:
     bits = []
     if ctx.caption_label or ctx.caption:
@@ -431,13 +453,14 @@ def _supports_effort(model: str) -> bool:
 
 
 def draft_with_vision(png: bytes, ctx: FigureContext, client,
-                      model: str, effort: str) -> tuple:
+                      model: str, effort: str,
+                      system_prompt: str = None) -> tuple:
     """Return (alt_text_or_None, reason). Never raises."""
     try:
         kwargs = dict(
             model=model,
             max_tokens=1024,
-            system=SYSTEM_PROMPT,
+            system=system_prompt or SYSTEM_PROMPT,
             messages=[{
                 "role": "user",
                 "content": [
@@ -462,9 +485,13 @@ def draft_with_vision(png: bytes, ctx: FigureContext, client,
     ).strip()
     if not text:
         return None, "empty_response"
-    if text.upper().startswith("DECORATIVE"):
+    # Match the sentinel EXACTLY, not as a prefix: a real description may
+    # legitimately open with the word ("Decorative border in school colours"),
+    # and a prefix test would silently discard it.
+    sentinel = text.upper().strip().rstrip(".")
+    if sentinel == "DECORATIVE":
         return None, "model_says_decorative"
-    if text.upper().startswith("UNCLEAR"):
+    if sentinel == "UNCLEAR":
         return None, "model_says_unclear"
     return " ".join(text.split()), None
 
@@ -556,6 +583,21 @@ def draft_alt_text(pdf_path: str, source_pdf: str, doc_content=None,
         vision_calls += 1
         alt, reason = draft_with_vision(
             png, ctx, client, config.ALT_TEXT_MODEL, config.ALT_TEXT_EFFORT)
+
+        # The model declined to describe it.  Every /Figure left with the
+        # placeholder "Figure" announces "there is something here" and then
+        # says nothing — worse for the reader than an imperfect description.
+        # Ask once more with the escape hatches removed.
+        if alt is None and reason in ("model_says_decorative", "model_says_unclear"):
+            vision_calls += 1
+            retry_alt, retry_reason = draft_with_vision(
+                png, ctx, client, config.ALT_TEXT_MODEL,
+                config.ALT_TEXT_EFFORT, system_prompt=FALLBACK_SYSTEM_PROMPT)
+            if retry_alt:
+                alt, reason = retry_alt, None
+            else:
+                reason = f"{reason} -> retry {retry_reason}"
+
         if alt:
             elem[pikepdf.Name("/Alt")] = pikepdf.String(alt)
             results.append(DraftResult(
