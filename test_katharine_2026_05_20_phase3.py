@@ -29,6 +29,8 @@ import shutil
 import tempfile
 import unittest
 
+from fixture_paths import batch_dir
+
 import pikepdf
 
 from pdf_tagger import (
@@ -165,14 +167,14 @@ class TestClusterVectorFigures(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    os.path.exists("/Users/mohakgarg/Desktop/reversionfixes (2)"),
+    os.path.isdir(batch_dir("reversionfixes (2)")),
     "Katharine 2026-05-20 input batch not present",
 )
 class TestPhase3EndToEnd(unittest.TestCase):
     """Re-runs the new batch through the current pipeline and asserts the
     specific defects Katharine flagged are gone."""
 
-    BATCH_DIR = "/Users/mohakgarg/Desktop/reversionfixes (2)"
+    BATCH_DIR = batch_dir("reversionfixes (2)")
 
     @classmethod
     def setUpClass(cls):

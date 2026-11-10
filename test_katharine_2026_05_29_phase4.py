@@ -30,6 +30,8 @@ import shutil
 import tempfile
 import unittest
 
+from fixture_paths import batch_dir
+
 import pikepdf
 
 from pdf_tagger import _is_banner_artifact
@@ -132,7 +134,7 @@ class TestPhase4BannerGate(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    os.path.exists("/Users/mohakgarg/Desktop/reversionfixes (3)"),
+    os.path.isdir(batch_dir("reversionfixes (3)")),
     "Katharine 2026-05-29 input batch not present",
 )
 class TestPhase4EndToEnd(unittest.TestCase):
@@ -140,7 +142,7 @@ class TestPhase4EndToEnd(unittest.TestCase):
     the Kellogg logos Katharine flagged are now demoted to /Artifact
     while real Figures (charts, photos) survive intact."""
 
-    BATCH_DIR = "/Users/mohakgarg/Desktop/reversionfixes (3)"
+    BATCH_DIR = batch_dir("reversionfixes (3)")
     FIXTURES = (
         "KEL003 Asahi.pdf",
         "KEL137 Keurig at Home TN.pdf",
