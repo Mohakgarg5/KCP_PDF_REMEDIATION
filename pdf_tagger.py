@@ -53,6 +53,9 @@ def tag_pdf(input_path: str, output_path: str, doc_content: DocumentContent) -> 
     # repetition signal is what lets us classify the Northwestern logo as
     # /Artifact without misclassifying e.g. sugar_daddy's page-3 line graph.
     banner_bboxes = _detect_repeating_banner_bboxes(pdf)
+    # Same idea for Form XObjects: a frame that repeats across pages is the
+    # page template, even when it is inset from the page edges (landscape).
+    repeating_form_bboxes = _detect_repeating_form_bboxes(pdf)
 
     _remove_existing_structure(pdf)
 
@@ -68,6 +71,7 @@ def tag_pdf(input_path: str, output_path: str, doc_content: DocumentContent) -> 
                 pdf, page, page_content, page_idx, mcid_counter,
                 source_figure_alts=page_source_figure_alts,
                 banner_bboxes=banner_bboxes,
+                repeating_form_bboxes=repeating_form_bboxes,
             )
         except Exception as e:
             logger.warning("Page %d tagging failed (%s), wrapping as artifact", page_idx, e)
@@ -288,7 +292,8 @@ def _remove_existing_structure(pdf: pikepdf.Pdf):
 def _tag_page(pdf, page, page_content: Optional[PageContent],
               page_idx: int, mcid_counter: list,
               source_figure_alts: Optional[dict] = None,
-              banner_bboxes: Optional[set] = None) -> list:
+              banner_bboxes: Optional[set] = None,
+              repeating_form_bboxes: Optional[set] = None) -> list:
     """Tag a single page's content stream with structure markers."""
     blocks = _build_block_index(page_content)
 
@@ -310,6 +315,7 @@ def _tag_page(pdf, page, page_content: Optional[PageContent],
         source_artifact_mask=source_artifact_mask,
         source_figure_regions=source_figure_regions,
         banner_bboxes=banner_bboxes,
+        repeating_form_bboxes=repeating_form_bboxes,
     )
 
     # Spatially cluster fragmented vector /Figure regions so a chart drawn
@@ -534,6 +540,14 @@ _PATH_OPS = frozenset({
     "m", "l", "c", "v", "y", "re", "f", "F", "f*",
     "B", "b", "S", "s", "B*", "b*", "n", "h", "W", "W*",
 })
+# Operators that actually PUT INK ON THE PAGE.  "n", "W" and "W*" are in
+# _PATH_OPS but paint nothing: W/W* only set a clipping region and n ends the
+# path without filling or stroking.  A clipped table cell — q re W* n BT … ET Q
+# — otherwise scores 3 path ops per clip, so two clips hit min_path_ops exactly
+# and the cell was promoted to a /Figure while drawing not a single mark
+# (Ontela p16: 23 such "figures" over live table text; rendering one produces a
+# blank image).  A region with no painting operator cannot be a figure.
+_PAINT_OPS = frozenset({"f", "F", "f*", "B", "B*", "b", "b*", "S", "s"})
 _TEXT_OPS = frozenset({"Tj", "TJ", "'", '"', "BT", "ET"})
 _XOBJECT_OPS = frozenset({"Do", "BI", "ID", "EI"})
 
@@ -577,14 +591,14 @@ def _detect_vector_figure_regions(
 
     depth = 0
     q_idx = -1
-    path_count = text_count = do_count = 0
+    path_count = text_count = do_count = paint_count = 0
 
     for i, (_, operator) in enumerate(ops):
         s = str(operator)
         if s == "q":
             if depth == 0:
                 q_idx = i
-                path_count = text_count = do_count = 0
+                path_count = text_count = do_count = paint_count = 0
             depth += 1
             continue
         if s == "Q":
@@ -593,6 +607,7 @@ def _detect_vector_figure_regions(
                 if depth == 0 and q_idx >= 0:
                     qualifies = (
                         path_count >= min_path_ops
+                        and paint_count > 0   # clipping alone draws nothing
                         and text_count <= max_text_in_region
                         and do_count == 0
                     )
@@ -616,6 +631,8 @@ def _detect_vector_figure_regions(
                 do_count += 1
         elif depth > 0 and s in _PATH_OPS:
             path_count += 1
+            if s in _PAINT_OPS:
+                paint_count += 1
 
     if cur_end >= 0:
         merged.append((cur_start, cur_end))
@@ -1375,7 +1392,8 @@ def _clean_form_xobject_markers(pdf: pikepdf.Pdf, page, xobj_name: str):
 
 def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
                     link_annots=None, pdf=None, source_artifact_mask=None,
-                    source_figure_regions=None, banner_bboxes=None):
+                    source_figure_regions=None, banner_bboxes=None,
+                    repeating_form_bboxes=None):
     """Walk through content stream ops, inserting BDC/EMC structure markers.
 
     Uses an "artifact-as-default" strategy so nothing is ever untagged.
@@ -2199,12 +2217,21 @@ def _insert_markers(ops, blocks, page, watermark_forms, mcid_counter,
                     and _form_is_full_page_background(
                         page, xobj_name, form_bbox, page_box)
                 )
+                # A frame that repeats across pages is the page template even
+                # when inset from the page edges, which is how InDesign draws
+                # it on landscape pages (Sony KE1165 /Fm0, 77% x 83%).
+                template_chrome = (
+                    repeating_form_bboxes
+                    and _form_is_template_chrome(
+                        form_bbox, page_box, repeating_form_bboxes,
+                        has_image=_form_contains_image(page, xobj_name))
+                )
 
                 form_alt_candidate = (
                     blocks[vec_idx].get("alt_text") if vec_idx is not None
                     else "Figure"
                 )
-                if (src_artifact or full_page_chrome
+                if (src_artifact or full_page_chrome or template_chrome
                         or _is_banner_artifact(form_bbox, page_box)
                         or _bbox_is_table_decoration(
                             form_bbox, form_alt_candidate)):
@@ -2596,6 +2623,72 @@ def _form_contains_image(page, xobj_name: str) -> bool:
         return _has_image(obj)
     except Exception:
         return False
+
+
+def _detect_repeating_form_bboxes(pdf, tol: float = 2.0) -> set:
+    """Bboxes of Form XObjects that appear on 2+ pages — page-template frames.
+
+    ``_form_is_full_page_background`` only recognises chrome that blankets
+    >= 90% of the page in both dimensions.  InDesign bleeds its template frame
+    full-page in PORTRAIT but insets it to the margin box in LANDSCAPE: Sony
+    KE1165's /Fm0 is [89.8, 51.3, 702.2, 559.6] on a 792x612 page — 77.3% by
+    83.1% — so it slipped the gate and became a /Figure on all five landscape
+    pages, over live table text on two of them.
+
+    Lowering the threshold would start eating real one-off diagrams.  What
+    actually separates a template frame from a large diagram is that the frame
+    REPEATS: same form, same bbox, several pages.  That is what this collects.
+    """
+    seen: dict = {}
+    for page in pdf.pages:
+        try:
+            xobjects = _get_xobjects(page) or {}
+        except Exception:
+            continue
+        page_boxes = set()
+        for name, obj in xobjects.items():
+            try:
+                if obj.get("/Subtype") != pikepdf.Name.Form:
+                    continue
+                bb = obj.get("/BBox")
+                if bb is None:
+                    continue
+                page_boxes.add(tuple(round(float(v), 1) for v in bb))
+            except Exception:
+                continue
+        for bb in page_boxes:
+            # Cluster within tolerance so sub-point jitter still matches.
+            for known in seen:
+                if all(abs(a - b) <= tol for a, b in zip(bb, known)):
+                    seen[known] += 1
+                    break
+            else:
+                seen[bb] = 1
+    return {bb for bb, n in seen.items() if n >= 2}
+
+
+def _form_is_template_chrome(form_bbox, page_box, repeating_bboxes,
+                             has_image: bool,
+                             min_coverage: float = 0.5) -> bool:
+    """True when a Form is a repeated page-template frame rather than content.
+
+    Three conditions, all required:
+      * it carries no raster image — a repeated full-bleed photo is content;
+      * its bbox is one of the repeating ones; and
+      * it covers at least ``min_coverage`` of the page in BOTH dimensions, so
+        small repeating marks stay with the banner/logo rule instead.
+    """
+    if has_image or not form_bbox or not page_box or not repeating_bboxes:
+        return False
+    if not _bbox_matches_any(list(form_bbox), repeating_bboxes, tol=2.0):
+        return False
+    pw = page_box[2] - page_box[0]
+    ph = page_box[3] - page_box[1]
+    if pw <= 0 or ph <= 0:
+        return False
+    bw = abs(form_bbox[2] - form_bbox[0])
+    bh = abs(form_bbox[3] - form_bbox[1])
+    return bw >= min_coverage * pw and bh >= min_coverage * ph
 
 
 def _form_is_full_page_background(page, xobj_name: str,
