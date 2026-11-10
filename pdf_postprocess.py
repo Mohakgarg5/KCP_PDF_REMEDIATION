@@ -1258,8 +1258,13 @@ def _fix_unmappable_figure_text(pdf: pikepdf.Pdf):
             # ("tt") and 59 ("ti") — and clause 7.21.7 fails on exactly those.
             # Gating registration on Type0 meant such a font was never even
             # considered.
-            if og is not None and has_tu and og not in used_by_font:
-                used_by_font[og] = {"obj": fo, "good": good, "codes": set()}
+            # A font with NO ToUnicode at all needs completion most of all —
+            # requiring one here made such a font invisible to the very pass
+            # meant to fix it (Sony KE1165 /C0_0, 50 unmapped glyphs).
+            if og is not None and og not in used_by_font and (
+                    has_tu or _needs_tounicode_completion(fo)):
+                used_by_font[og] = {"obj": fo, "good": good, "codes": set(),
+                                    "multibyte": multibyte, "had_tu": has_tu}
 
         try:
             ops = list(pikepdf.parse_content_stream(page))
@@ -1303,7 +1308,7 @@ def _fix_unmappable_figure_text(pdf: pikepdf.Pdf):
                 cur = str(operands[0])
             elif o in ("Tj", "TJ", "'", '"') and cur in finfo:
                 good, has_tu, multibyte, og = finfo[cur]
-                if not has_tu:
+                if not has_tu and og not in used_by_font:
                     continue
                 strs = []
                 for x in operands:
@@ -1351,8 +1356,17 @@ def _fix_unmappable_figure_text(pdf: pikepdf.Pdf):
             recovered_total += _append_tounicode_recovered(
                 pdf, info["obj"], recovered)
             missing = missing - set(recovered)
-        if missing:
+        if not missing:
+            continue
+        if info.get("had_tu"):
             completed += _append_tounicode_placeholders(pdf, info["obj"], missing)
+        else:
+            # No CMap to append to — build one.  The reading is carried by the
+            # enclosing /Figure's /ActualText (all 84 of Sony's runs in this
+            # font sit inside the figure Katharine described), so a placeholder
+            # here satisfies clause 7.21.7 without losing content.
+            completed += _create_tounicode_from_scratch(
+                pdf, info["obj"], missing, multibyte=info.get("multibyte"))
 
     if patched:
         logger.warning(
@@ -1800,6 +1814,92 @@ def _add_type0_tounicode_cmap(pdf: pikepdf.Pdf, font_obj) -> bool:
     cmap_stream = pikepdf.Stream(pdf, cmap_str.encode("latin-1"))
     font_obj[pikepdf.Name("/ToUnicode")] = cmap_stream
     return True
+
+
+def _cff_glyph_names(font_obj) -> dict:
+    """{glyph index -> glyph name} from a BARE CFF program, or {}.
+
+    ``_build_type0_tounicode_map`` parses with ``fontTools.ttLib.TTFont``,
+    which only understands sfnt-wrapped fonts.  Sony KE1165's
+    /C0_0 CMIUKZ+ArialMT is a /CIDFontType0 whose /FontFile3 is a raw CFF
+    (Subtype /CIDFontType0C); TTFont rejects it outright with "Not a TrueType
+    or OpenType font (bad sfntVersion)", so synthesis silently produced
+    nothing and 50 glyphs were left unmappable.  CFFFontSet reads it fine.
+    """
+    try:
+        descendants = font_obj.get("/DescendantFonts")
+        fd = (descendants[0].get("/FontDescriptor") if descendants
+              else font_obj.get("/FontDescriptor"))
+        if fd is None or "/FontFile3" not in fd:
+            return {}
+        data = bytes(fd["/FontFile3"].read_bytes())
+    except Exception:
+        return {}
+    try:
+        import io
+        from fontTools.cffLib import CFFFontSet
+        cff = CFFFontSet()
+        cff.decompile(io.BytesIO(data), None)
+        td = cff[cff.fontNames[0]]
+        return {i: name for i, name in enumerate(td.charset)}
+    except Exception as e:
+        logger.debug("bare-CFF parse failed: %s", e)
+        return {}
+
+
+def _create_tounicode_from_scratch(pdf, font_obj, codes,
+                                   multibyte: bool = True,
+                                   placeholder: int = 0x20) -> int:
+    """Attach a brand-new ToUnicode CMap to a font that has none.
+
+    ``_append_tounicode_placeholders`` surgically edits an EXISTING CMap and
+    returns 0 when there is nothing to edit, which is why a font carrying no
+    ToUnicode stayed broken even once it was being considered.
+    """
+    wanted = sorted(c for c in codes if 0 <= c <= 0xFFFF)
+    if not wanted:
+        return 0
+    width = 4 if multibyte else 2
+    lines = [
+        "/CIDInit /ProcSet findresource begin",
+        "12 dict begin", "begincmap",
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def",
+        "/CMapName /Adobe-Identity-UCS def", "/CMapType 2 def",
+        "1 begincodespacerange",
+        "<0000><FFFF>" if multibyte else "<00><FF>",
+        "endcodespacerange",
+    ]
+    for i in range(0, len(wanted), 100):
+        chunk = wanted[i:i + 100]
+        lines.append(f"{len(chunk)} beginbfchar")
+        for c in chunk:
+            lines.append(f"<{c:0{width}X}> <{placeholder:04X}>")
+        lines.append("endbfchar")
+    lines += ["endcmap",
+              "CMapName currentdict /CMap defineresource pop", "end", "end"]
+    try:
+        font_obj[pikepdf.Name("/ToUnicode")] = pikepdf.Stream(
+            pdf, "\n".join(lines).encode("latin-1"))
+    except Exception as e:
+        logger.debug("could not attach new ToUnicode: %s", e)
+        return 0
+    return len(wanted)
+
+
+def _needs_tounicode_completion(font_obj) -> bool:
+    """True when a font should be considered by the clause-7.21.7 pass.
+
+    Previously the pass required an EXISTING ToUnicode in two places, so a
+    font carrying none at all was invisible to the very pass meant to fix it.
+    A font with no ToUnicode needs completion most of all.
+    """
+    try:
+        if font_obj.get("/ToUnicode") is None:
+            return True
+        good, has_tu = _tounicode_good_codes(font_obj)
+        return has_tu and len(good) == 0
+    except Exception:
+        return False
 
 
 def _build_type0_tounicode_map(font_obj) -> dict:
