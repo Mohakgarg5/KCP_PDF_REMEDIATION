@@ -130,6 +130,55 @@ class TestHouseStylePrompt(unittest.TestCase):
         self.assertFalse(hasattr(A, "draft_deterministic"))
 
 
+class TestTablesTrappedInImages(unittest.TestCase):
+    """A genuine table never reaches the drafter — it is tagged /Table.
+
+    So anything table-shaped arriving here is stuck inside an image and its
+    cells are unreachable. The house style wants one short subject line plus a
+    flag, never a transcription.
+    """
+
+    def test_prompt_explains_why_a_table_got_here(self):
+        s = _flat(A.SYSTEM_PROMPT)
+        self.assertIn("never reaches you", s)
+        self.assertIn("trapped in an image", s)
+        self.assertIn("Never transcribe it", s)
+
+    def test_prompt_carries_the_subject_not_mechanics_example(self):
+        s = _flat(A.SYSTEM_PROMPT)
+        self.assertIn("per-unit depreciation if each ran at its designed volume", s)
+        self.assertIn("never its columns", s)
+
+    def test_detects_a_table_from_the_draft(self):
+        ctx = FigureContext(page=1, bbox=[0, 0, 1, 1])
+        self.assertTrue(A._looks_like_a_table(
+            "Table comparing the two firms' per-unit depreciation.", ctx))
+
+    def test_detects_a_table_from_the_caption(self):
+        ctx = FigureContext(page=1, bbox=[0, 0, 1, 1],
+                            caption="Table 3: Revenue by segment")
+        self.assertTrue(A._looks_like_a_table("Chart of something", ctx))
+
+    def test_a_graph_is_not_flagged(self):
+        ctx = FigureContext(page=1, bbox=[0, 0, 1, 1],
+                            caption="Figure 2: Sales over time")
+        self.assertFalse(A._looks_like_a_table("Line graph of sales.", ctx))
+
+    def test_report_marks_data_locked_tables(self):
+        summary = {
+            "pdf": "x.pdf", "figures_needing_alt": 1, "drafted": 1,
+            "vision": 1, "left_blank": 0, "data_locked_in_image": 1,
+            "model": "claude-sonnet-5",
+            "figures": [{"page": 4, "caption": "Table 2: Segment results",
+                         "method": "vision", "reason": None,
+                         "alt_text": "Table comparing segment profitability.",
+                         "data_locked_in_image": True}],
+        }
+        text = A.format_report(summary)
+        self.assertIn("DATA LOCKED IN IMAGE", text)
+        self.assertIn("tables trapped in an image", text)
+
+
 class TestHarvestedValuesAreContextOnly(unittest.TestCase):
     """Text-layer values help the model understand, but must not be read out."""
 

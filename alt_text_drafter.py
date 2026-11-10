@@ -91,6 +91,18 @@ class DraftResult:
     alt_text: Optional[str]
     reason: Optional[str] = None
     model: Optional[str] = None
+    # A table reaching the drafter is trapped in an image, so its cells are
+    # unreachable to a screen reader no matter how good the description is.
+    # The house style says to flag that rather than transcribe it.
+    data_locked_in_image: bool = False
+
+
+def _looks_like_a_table(alt: Optional[str], ctx: "FigureContext") -> bool:
+    """True when the drafted figure is a table stuck inside an image."""
+    if alt and alt.strip().lower().startswith("table"):
+        return True
+    cap = (ctx.caption or "") if ctx else ""
+    return bool(re.match(r"\s*table\b", cap, re.IGNORECASE))
 
 
 # ---------------------------------------------------------------------------
@@ -336,8 +348,7 @@ LENGTH
   tight line is the goal; two sentences is the absolute ceiling. Reach for a
   second sentence only when the visual genuinely carries two distinct ideas.
 - Photographs and ads: ~25 words, less if it reads clean.
-- Tables (only when you are told to describe one): ~15 words, one clause,
-  naming what it is ABOUT — never its columns or computations.
+- Tables: ~15 words, ONE clause.
 
 OPENING WORDS
 Open on the noun naming the visual type, with NO leading article:
@@ -367,6 +378,18 @@ styling, "three orange cranes"). KEEP named specifications and data
 ("60-watt equivalent", "rated to last nine years") — those are facts, not
 visuals. Exception: when the form IS the subject (a design-patent drawing, an
 architectural rendering, a logo-design exhibit), describe the shape.
+
+TABLES
+A genuine table a screen reader can walk cell by cell never reaches you — it
+is tagged as a table, not a figure. So a table arriving here is trapped in an
+image, and its data is unreachable. Give it ONE short line naming what the
+table is ABOUT — its subject, never its columns, its computations or its
+cells. Never transcribe it. Begin the line with "Table".
+  Too wordy (mechanics): "Table comparing the two firms on depreciation,
+  laying out capacity, output, and utilization to work out how their per-unit
+  depreciation would differ if each ran at its designed volume."
+  Right (subject): "Table comparing the two firms' per-unit depreciation if
+  each ran at its designed volume."
 
 PARTICULAR CASES
 - Structural diagrams — org charts, flow charts, value chains, nested-box
@@ -588,7 +611,8 @@ def draft_alt_text(pdf_path: str, source_pdf: str, doc_content=None,
             elem[pikepdf.Name("/Alt")] = pikepdf.String(alt)
             results.append(DraftResult(
                 page=page_no, bbox=bbox, caption=ctx.caption,
-                method="vision", alt_text=alt, model=config.ALT_TEXT_MODEL))
+                method="vision", alt_text=alt, model=config.ALT_TEXT_MODEL,
+                data_locked_in_image=_looks_like_a_table(alt, ctx)))
         else:
             if reason and reason.startswith("api_error"):
                 api_failures += 1
@@ -622,6 +646,7 @@ def draft_alt_text(pdf_path: str, source_pdf: str, doc_content=None,
         "drafted": len(drafted),
         "vision": sum(1 for r in results if r.method == "vision"),
         "left_blank": sum(1 for r in results if r.method == "skipped"),
+        "data_locked_in_image": sum(1 for r in results if r.data_locked_in_image),
         "model": config.ALT_TEXT_MODEL if config.ALT_TEXT_USE_VISION else None,
         "figures": [asdict(r) for r in results],
     }
@@ -642,6 +667,11 @@ def format_report(summary: dict) -> str:
         f"  drafted                       : {summary['drafted']}",
         f"  left blank for manual input   : {summary['left_blank']}",
     ]
+    if summary.get("data_locked_in_image"):
+        lines.append(
+            f"  tables trapped in an image    : {summary['data_locked_in_image']}"
+            "  (cells unreachable to a screen reader — needs a real table or"
+            " a full transcription)")
     if summary.get("model"):
         lines.append(f"  model                         : {summary['model']}")
     lines.append("")
@@ -651,7 +681,8 @@ def format_report(summary: dict) -> str:
             head += f"  [{f['caption'][:60]}]"
         lines.append(head)
         if f["alt_text"]:
-            lines.append(f"      ({f['method']}) {f['alt_text']}")
+            mark = " [DATA LOCKED IN IMAGE]" if f.get("data_locked_in_image") else ""
+            lines.append(f"      ({f['method']}){mark} {f['alt_text']}")
         else:
             lines.append(f"      LEFT BLANK — {f.get('reason')}")
     return "\n".join(lines)
