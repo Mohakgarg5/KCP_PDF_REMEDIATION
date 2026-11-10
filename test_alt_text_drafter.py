@@ -110,9 +110,9 @@ class TestHouseStylePrompt(unittest.TestCase):
         self.assertIn("Do not copy the exhibit title word for word",
                       _flat(A.SYSTEM_PROMPT))
 
-    def test_carries_the_colour_rule(self):
+    def test_carries_the_color_rule(self):
         s = _flat(A.SYSTEM_PROMPT)
-        self.assertIn("Do not mention colour unless the colour itself carries", s)
+        self.assertIn("Do not mention color unless the color itself carries", s)
         self.assertIn("KEEP named specifications", s)
 
     def test_carries_the_graph_vs_chart_distinction(self):
@@ -198,9 +198,9 @@ class TestRendering(unittest.TestCase):
         # flipped or un-scaled crop gets wrong.
         want = (467.2 - 67.1) / (375.7 - 74.8)
         self.assertAlmostEqual(img.width / img.height, want, delta=0.12)
-        # A blank crop (wrong y origin) would have near-zero colour variance.
-        colours = img.convert("RGB").getcolors(maxcolors=1 << 24) or []
-        self.assertGreater(len(colours), 500, "crop looks blank")
+        # A blank crop (wrong y origin) would have near-zero color variance.
+        colors = img.convert("RGB").getcolors(maxcolors=1 << 24) or []
+        self.assertGreater(len(colors), 500, "crop looks blank")
 
     def test_oversize_figure_is_downscaled(self):
         from PIL import Image
@@ -274,10 +274,10 @@ class TestVisionPath(unittest.TestCase):
 
     def test_a_description_merely_starting_with_the_sentinel_is_kept(self):
         # The sentinel must match exactly.  A prefix test discarded
-        # "Decorative border in school colours." as if it were a decline.
+        # "Decorative border in school colors." as if it were a decline.
         alt, reason, _ = self._call(
-            _Resp("Decorative border in school colours."))
-        self.assertEqual(alt, "Decorative border in school colours.")
+            _Resp("Decorative border in school colors."))
+        self.assertEqual(alt, "Decorative border in school colors.")
         self.assertIsNone(reason)
         alt2, _r, _ = self._call(_Resp("Unclear photograph of a storefront."))
         self.assertEqual(alt2, "Unclear photograph of a storefront.")
@@ -329,8 +329,8 @@ class TestDeclinedFiguresAreRetried(unittest.TestCase):
 
     def test_decorative_then_retry_produces_a_description(self):
         alt, reason, client = self._run(
-            [_Resp("DECORATIVE"), _Resp("Decorative border in school colours.")])
-        self.assertEqual(alt, "Decorative border in school colours.")
+            [_Resp("DECORATIVE"), _Resp("Decorative border in school colors.")])
+        self.assertEqual(alt, "Decorative border in school colors.")
         self.assertIsNone(reason)
         self.assertEqual(len(client.messages.calls), 2)
 

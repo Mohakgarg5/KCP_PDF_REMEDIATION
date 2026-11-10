@@ -23,30 +23,30 @@ text or a data table carries the specifics.
   (a rising trend, a comparison across groups, a step-by-step process).
 - **Lead with the concept. Do NOT front-load specific numbers, data labels,
   axis values or category names.**
-- Prioritise meaning over literal contents.
+- Prioritize meaning over literal contents.
 
 Photographs and ads may carry more concrete visual description — there is no
 underlying data table to defer to — but keep it tight.
 
-## Colour and non-functional visual detail
+## Color and non-functional visual detail
 
-Do NOT include colour unless the colour itself carries functional meaning.
+Do NOT include color unless the color itself carries functional meaning.
 Many screen-reader users have been blind since birth and have no experiential
-reference for colour.
+reference for color.
 
-- Cut purely decorative colour ("a red bandana", "the green bars").
-- Keep colour only when it IS the information — a red-versus-green status
-  indicator, or a legend where colour is the only way categories are told
-  apart (and then name what the colour means, not the hue).
+- Cut purely decorative color ("a red bandana", "the green bars").
+- Keep color only when it IS the information — a red-versus-green status
+  indicator, or a legend where color is the only way categories are told
+  apart (and then name what the color means, not the hue).
 
 Named-spec test for any concrete detail:
-- **Keep** named specifications and data ("colour temperature 3500",
+- **Keep** named specifications and data ("color temperature 3500",
   "60-watt equivalent", "rated to last nine years") — facts, not visuals.
 - **Cut** appearance-only descriptors (hue, sheen, exact packaging styling).
 
 Exception — when the appearance IS the subject: a design-patent drawing, an
 architectural rendering, a logo-design exhibit. There the form is the payload.
-Still skip incidental colour.
+Still skip incidental color.
 
 ## "graph" vs "chart"
 
@@ -55,7 +55,7 @@ Still skip incidental colour.
 - **chart** for other visual formats — flowcharts, org charts, comparison
   tables presented visually.
 - Test: plotting numeric data on axes? → graph. Different structure? → chart.
-- Don't trust the caption's label. A Bloomberg screenshot labelled "Bar Chart"
+- Don't trust the caption's label. A Bloomberg screenshot labeled "Bar Chart"
   is usually an OHLC chart (open-high-low-close) — each vertical bar is one
   trading period. Its cousin is the candlestick chart. For these, **"price
   chart"** is the honest plain-language term. Common in finance material.
@@ -79,7 +79,7 @@ two distinct ideas.
   text isn't a redundant echo of a caption that may already be read aloud.
 - **Dates:** cut dates that merely restate the title. If the title does NOT
   state the span, pull it from the axis or plotted data and include it — a
-  graph labelled only "sales history" reads very differently stopping in 2004
+  graph labeled only "sales history" reads very differently stopping in 2004
   versus running to 2025. Test: is the date in the title? Yes → cut. No, and
   it's part of what the visual shows → keep.
 
@@ -109,7 +109,7 @@ user explicitly says that table needs it.
 When a table IS flagged: describe it, never transcribe it. ONE short orienting
 line naming what kind of table it is and what it's **about** — its subject,
 not its mechanics. ~15 words, one clause. Naming columns or computations
-re-summarises what the screen reader is about to walk.
+re-summarizes what the screen reader is about to walk.
 
 - Too wordy (mechanics): "Table comparing the two firms on depreciation,
   laying out capacity, output, and utilization to work out how their per-unit
@@ -238,7 +238,7 @@ Genogram
 - Good: "Family-tree diagram spanning three generations, running from a
   founding couple at the top down through their children and grandchildren."
 
-Product photo — colour stripped, named specs kept
+Product photo — color stripped, named specs kept
 - Padded: "A compact fluorescent bulb with a white spiral tube in red-and-
   white retail blister packaging."
 - Good: "Fluorescent light bulb with a spiral tube, in packaging that
@@ -247,5 +247,5 @@ Product photo — colour stripped, named specs kept
 
 Specifications screenshot
 - Good: "Screenshot of the bulb's online product page listing specifications
-  such as dimensions, lumens, wattage, colour temperature, rated life, and
+  such as dimensions, lumens, wattage, color temperature, rated life, and
   voltage."

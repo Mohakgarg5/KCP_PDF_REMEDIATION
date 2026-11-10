@@ -1,0 +1,804 @@
+# Exhibit Alt Text (Audio-First) — raw extraction from the reviewer's .pages file
+#
+# Source: ~/Desktop/Exhibit Alt Text (Audio-First).pages, sent 2026-11-10.
+# Extracted from the IWA (snappy-framed protobuf) payload, so bold runs are
+# split across lines and the Length-targets TABLE does not survive (it shows
+# as a single object marker). The readable version in ALT_TEXT_HOUSE_STYLE.md
+# is the one to work from; this is kept only so the wording can be checked
+# against the original without opening Pages.
+#
+Exhibit Alt Text (Audio-First)
+Alt text here is written to be
+ heard, not read. A listener using a screen reader takes it in as a spoken audio clip, so the whole craft is making it easy to process by ear: concept first, plain language, short sentences, and no data dumps. The guiding principle across everything below is
+— clear and concise beats comprehensive. If a shorter version conveys the idea just as well, use the shorter version, and lean toward the short end by default.
+The one exception is mathematical formulas, which follow a stricter full-fidelity standard. See the formula section.
+Core principle: alt text orients, it doesn't replace
+For graphs, charts, diagrams, and timelines, the alt text's job is only to flag that a visual is present and orient the listener to its general nature. The surrounding text or an accompanying data table carries the specifics. So:
+Write
+ two tight sentences at most
+— often one is enough. This is the target, not just a ceiling.
+State what
+ of visual it is and the general idea or shape it conveys (a rising trend, a comparison across groups, a step-by-step process).
+Lead with the concept. Do NOT front-load specific numbers, data labels, axis values, or category names. A listener should process it the way they'd naturally take in "there's a graph here showing X trend" 
+— not a recitation of data points.
+Prioritize meaning over literal contents.
+For photographs and ads, more concrete visual description is appropriate since there's no underlying data table to defer to 
+— but keep it tight.
+Color and non-functional visual detail
+Do NOT include color unless the color itself carries functional meaning. Many screen-reader users have been blind since birth and have no experiential reference for color, so "red-and-white packaging" or "a blue line" is just noise that lengthens the clip without conveying anything usable.
+Cut color
+ that is purely decorative or descriptive ("a red bandana," "the green bars").
+Keep color only when it
+— e.g., a red-versus-green status indicator where the whole point is the distinction, or a legend where color is the only way categories are told apart (and even then, name what the color
+ means, not the hue for its own sake).
+More broadly, apply the
+ to any concrete detail: keep it if it's a value a listener could act on, cut it if it's visual-only.
+Keep:
+ named specifications and data ("color temperature 3500," "60-watt equivalent," "rated to last nine years"). These are facts, not visuals.
+Cut:
+ appearance-only descriptors that add length without information (hue, sheen, exact packaging styling).
+Exception 
+— when the appearance IS the subject matter, describe the form.
+ The rule above cuts appearance because it's usually incidental to the point. But sometimes the shape
+ ornamental design-patent drawing
+ exists precisely to show a protected form, an architectural rendering exists to show a massing, a logo-design exhibit exists to show the mark. There, describing the form ("slim rectangular handheld with a display above a circular control wheel") is conveying the payload, not padding. Still skip incidental color; describe the shape/arrangement that the exhibit exists to communicate.
+Terminology: "graph" vs "chart"
+Use
+— line graphs, bar graphs, scatter plots, anything plotting quantitative data on axes. This is the default for data plots.
+Reserve
+ for other visual formats where it fits better 
+— flowcharts, org charts, comparison tables presented visually.
+Quick test: is it plotting numeric data on axes? 
+→ graph. A different kind of visual structure? 
+→ chart.
+Don't trust the caption's label 
+— read the actual shape.
+ A Bloomberg terminal screenshot labeled "Bar Chart" is usually an
+ (open-high-low-close): each vertical bar is one trading period, with a left tick for the open and a right tick for the close, NOT a bar graph rising from a baseline. Its cousin is the
+ (same four values, drawn as a filled body between open and close). For these, "price chart" is the honest plain-language term 
+— it orients a listener without demanding they know the OHLC convention, and it avoids the "bar graph" mispicture. These are common in finance material, so expect them.
+Length targets
+
+￼
+These are targets, not quotas 
+— lean short by default. One crisp 
+≤15-word line usually does the whole job for a graph, chart, or diagram; only reach for a second sentence when the visual genuinely carries two distinct ideas (e.g., a main plot plus a separate set of bands beneath it). Shorter is always fine and usually better. The numbers matter far less than the overall concept and conveyed meaning.
+Exhibit titles
+Do NOT copy the exhibit title word-for-word into the alt text.
+DO reference the relevant subject matter from the title, phrased differently, so the alt text isn't a redundant echo of a caption that may already be read aloud.
+Dates:
+ cut dates that merely restate the title; keep only date spans intrinsic to what the visual depicts and absent from the title. If the title does NOT state the time span, pull it from the axis or plotted data and include it 
+— these documents range widely in vintage, so a concrete "when" gives the listener footing the title otherwise leaves vague (a graph labeled only "sales history" reads very differently stopping in 2004 versus running to 2025). If the title already carries the dates, leave them out of the body to avoid echoing the caption. Quick test: is the date in the title? If yes, cut it. If no and it's part of what the visual shows, keep it.
+Multiple images in one exhibit
+An exhibit can hold more than one image (e.g., a product photo plus a specifications screenshot, or several product samples). Give
+ each image its own separate alt text
+ rather than one blended description 
+— a listener needs to know how many visuals are present and what each one is.
+But a single composed graphic is ONE figure, not several.
+— say a "markets" panel with category boxes plus a few product photos arranged as one graphic 
+— reads as one thing and gets one alt text. Don't shatter a composed layout into a separate description per sub-element. The test: is this genuinely separate images sitting near each other, or one deliberately arranged graphic? Split the former; keep the latter whole.
+Logo walls / client collages:
+ do NOT enumerate every logo. A wall of client or partner logos exists to signal breadth, not to be read name by name; the prominent players almost always appear in the body text, and these documents can be old enough that brands have merged, folded, or changed sectors 
+— not worth the time to verify. One brief line does it: e.g., "Selection of logos for [company]'s major clients gathered together."
+Repeated exhibits in a series
+When a document has a run of exhibits built from one template that differ only by a single variable (e.g., the same quarterly spreadsheet repeated per product line, or a series of near-identical graphs), describe the structure once and then lean on
+— naming only what changes. Re-describing the identical setup each time forces a listener to re-process the same orientation over and over, which is exactly the noise audio-first is trying to cut. The one requirement: each line must still name the distinguishing variable ("same format, for the bars line") so nobody loses track of which one they're on. If nothing distinguishes them, "same format" tips from economy into a dodge.
+Tables
+Do NOT write alt text for tables by default. Most tables are genuine tables (rows and columns a screen reader can navigate cell by cell) and don't need a prose description 
+— describing them can even be redundant.
+ Only write alt text for a table when the user explicitly says that particular table needs it.
+ Otherwise, skip tables and handle only the actual images, graphs, charts, diagrams, and formulas.
+When a table IS flagged, describe it 
+ A flagged table gets ONE short orienting line: name what kind of table it is and what it's
+— its subject, not its mechanics. Keep it to
+ than a graph, not the same: a graph's shape has to be conveyed in words because the listener can't see the trend, but a table's cells are navigable, so the line only has to say "a table is here and here's the gist" and then get out of the way. Naming columns, computations, or how the table is built ("adjusting X's figures for a like-for-like comparison," "laying out capacity, output, and utilization to work out...") is re-summarizing what the screen reader is about to walk anyway 
+— that's the bloat to cut.
+Do NOT read out the cells, row by row or otherwise. This holds even when the table is trapped in an image and a screen reader would otherwise get nothing from it 
+— the answer is still a description, not a wall of transcribed data. Full cell-by-cell transcription is reserved exclusively for
+ (forms, statements, rate sheets 
+— see next section), where the exact wording is the payload. A data table is never that, no matter how it's stored. (You may still separately
+ an image-trapped table as data-locked-in-an-image so the user knows it isn't natively accessible 
+— but flagging is a one-line heads-up, not license to transcribe.)
+Watch the failure mode: a flagged table drifting into a column-by-column summary.
+ The tell is a line that walks the reader through what the table computes instead of naming what it's about.
+
+ Too wordy (mechanics): "Table comparing the two firms on depreciation, laying out capacity, output, and utilization to work out how their per-unit depreciation would differ if each ran at its designed volume." (30 words, previews the columns)
+
+ Tight (subject): "Table comparing the two firms' per-unit depreciation if each ran at its designed volume." (~14 words)
+The subject 
+— "per-unit depreciation under designed volume" 
+— is the whole job. The columns that get there are for the reader to navigate, not for the alt text to recite.
+Structural diagrams count as figures 
+— even when built from live text
+A diagram whose meaning lives in its
+— an org chart, a nested-box claim parse, a flow or process chart, a value chain, a chasm/two-sides diagram, an arrow diagram of converging or opposing forces 
+— is a describable figure and gets a normal one-line orienting description. Describe it as a diagram/chart even when it is drawn as vector boxes with live, selectable text inside them.
+Do NOT skip these as "just live text." The reason a genuine table, an equation, or a plain bordered text callout is skipped when it's live is that a screen reader reads it in a sensible linear order and loses nothing. A structural diagram is different: the relationships (hierarchy, sequence, grouping, the gap between two blocks, arrows converging) are carried
+ visually, and reading the box labels in isolation drops exactly the information the figure exists to convey. So the test is not "is the text live?" but "does the arrangement carry meaning the linear text doesn't?" If yes, describe it.
+Org chart 
+→ "Organization chart tracing the hierarchy from X down to Y."
+Nested-box claim parse 
+→ "Nested-box diagram parsing the claim into layered elements, from the outer device down through its sub-parts."
+Chasm / two-community diagram 
+→ "Diagram of the transition 'chasm,' with the two communities on opposite sides of a gap."
+Genuinely plain live-text content still gets skipped: real data tables (see above), equations that are live text, bulleted or numbered lists set as ordinary text, and simple bordered callout boxes that are just a sentence in a frame.
+Images of text (reproduced forms, statements, rate sheets)
+Some exhibits are not charts or photos but
+— a reproduced grant application, a filled-in form, a prospectus term sheet, a utility rate sheet saved as a picture. Here the image
+ the content, so a "describe the visual" summary would strip out the very information the exhibit exists to convey. Treat these as two paired parts:
+A short identifying alt
+ naming what the image is (e.g., "A reproduction of the program's original grant application, laid out as a bordered form.").
+A full text alternative
+ that transcribes the content so it can be read aloud.
+When transcribing for the ear:
+Spell out numbered lists
+…") rather than leaving bare digits mid-sentence.
+Expand abbreviations
+ to their full words ("F2S" 
+→ "Farm to School") for clean listening.
+Transcribe faithfully 
+— don't silently "fix" the source. If the original has an odd acronym or misspelling, keep the meaning intact and flag it rather than correcting it invisibly.
+Flag data-locked-in-an-image:
+ if a rate sheet, table, or dense reference is trapped inside a picture rather than living as real text, call it out. A short identifying line alone leaves all that data unreadable to a screen reader; note that it needs a full transcription to be truly accessible, and let the user decide.
+Boundary 
+— not everything with words on it is an image-of-text.
+ Transcription is for cases where the
+ exact wording is the payload: forms, grant applications, statements, rate sheets, prospectus terms. A
+ designed values / mission / corporate-policy slide
+— even one with several full sentences set among photos 
+— is treated like any ordinary figure: a concept-first orienting line, no quoting. The signal isn't "does it contain sentences," it's "does the listener need the precise text to use the exhibit, or just to know what the exhibit is?" A policy slide is the latter. When in doubt, ask whether losing the exact words loses the point; if not, describe, don't transcribe.
+Genograms and family trees
+A
+ is a specialized family tree. A plain family tree shows who is related to whom; a genogram keeps that structure but layers on standardized symbols (squares/circles for sex, a cross-out for deceased, ages or birth years, and often bold outlines or shading to flag an attribute like "worked at the company"). Describe it high-level, like any diagram:
+Call it a
+ family-tree diagram, note roughly how many generations it spans, and convey the general shape (a small founding group widening into many descendants).
+Leave the symbol conventions out
+ of the alt text by default 
+— assume a key or the surrounding text explains them. Only name a convention when it carries meaning the text doesn't cover (e.g., bold outlines marking family members who were employees) and the user wants it included.
+Opening words
+Open on the noun naming the visual type, with no leading article.
+ Write "Line graph tracking
+…". Dropping the article is tighter and reads cleanly as an audio label. Apply this to every visual type.
+Don't begin with "image of" or "picture of."
+Mathematical formulas (full-fidelity 
+— the one exception)
+First, check whether the formula even needs alt text:
+ an equation that is already live, selectable text does not need alt text
+— a screen reader can read it. Only write formula alt text for equations that appear as
+ images.
+Watch for equation objects that only
+ Equations built in an equation editor (MathType / Office Equation Editor) and embedded in a PDF often carry a text layer, but that layer linearizes into scrambled, out-of-order tokens (e.g.,
+ X t M e q p e p q t ( ) ( ) ( ) = 
+− +). A scrambled or non-linear extraction is the tell: a screen reader would read that gibberish, so treat the equation as an image and give it full-fidelity alt text even though a text layer nominally exists. Clean, in-order inline math typed as ordinary characters (e.g.,
+ sitting in a sentence) is genuinely live 
+— skip it.
+Don't scope the formula pass to exhibits.
+ Equations live in running narrative, appendices, footnotes, and worked examples as often as in numbered figures. Sweep the whole document for image-equations, not just the exhibit pages.
+When a formula is an image, it typically appears with little or no surrounding narrative to reconstruct it from, so the alt text has to
+ the equation. The less-is-more rule does NOT apply. This follows spoken-math accessibility convention (MathSpeak / MathML accessibility guidance).
+Rules for formulas:
+Read every term in full.
+ Do not collapse repeated structure with shorthand like "the same form as above." A sighted reader can skim repetition; a listener cannot re-scan, so each piece is spoken in full even when it repeats.
+Use explicit grouping words
+ to fence off structure the listener can't see. For fractions, say the numerator then "all over" then the denominator. For grouped terms, use "the quantity ... " to mark where a group begins.
+Voice true exponents, trimmed to "to the i"
+ (not "to the power of i"). The exponent language is essential 
+— it tells the listener where the power starts and ends 
+— but the shorter form avoids bulk when exponents recur.
+When a grouped expression is raised to a power, fence the group first and put the power at the end.
+ Say "the quantity X of t minus one, squared," NOT "the square of X of t minus one." Front-loading "the square of ..." blurs where the group starts and ends by ear 
+— a listener can't tell whether it's [X(t
+². Open with "the quantity," read the group, then close with "squared" / "to the i." Same for square roots: "the square root of the quantity b squared minus four a c," so the radicand is clearly fenced.
+Distinguish superscript/subscript
+ Not every raised character is an exponent. Labels like R^RF (risk-free) or R^MAR (minimum acceptable return) are identifiers, not powers 
+— read them as "R superscript RF" / "R superscript MAR," and subscripts as "R sub t." Reading a label as a power ("R to the RF") is a misparse.
+Read what is literally rendered 
+— never simplify to an algebraic equivalent.
+ Speak the equation exactly as it appears on the page, even when a tidier equal form exists. If the source writes M times the quantity one-half minus p over two q, read that 
+— do not "helpfully" collapse it to M over two times the quantity one minus p over q. The listener is entitled to the same expression a sighted reader sees, not a rearranged one. This extends the faithful-transcription rule from images-of-text: also transcribe internal inconsistencies rather than reconciling them 
+— if the left side is labeled U of one-point-seven-two-eight x while the numerator uses one-point-seven-three, read both as written and flag the mismatch for the user.
+Read numbers as full number-words
+ ("two hundred sixty thousand," not "two-sixty-K"). Less ambiguous aloud.
+Set up structure before details.
+ Open a summation with "the sum, from i equals one to thirty-five, of ..." so the listener knows the shape before the contents arrive.
+Accuracy is paramount.
+ Before finalizing formula alt text, state back to the user how you're reading the equation so a misparse can be caught 
+— subscripts and superscripts are easy to misread from a rendered image. Take the verification burden on yourself rather than asking the user to check the math; re-examine the source at high magnification when unsure.
+Example 
+— present-value formula:
+ V equals the sum, from i equals one to infinity, of the following term: rent in year i minus expenses in year i, all over the quantity one plus r, to the i.
+Example 
+— Sharpe ratio (superscript label, not a power):
+ SR equals: one over T, times the sum, from t equals one to T, of the quantity R sub t minus R sub t superscript RF; all over sigma of R sub t.
+Quick self-check before finalizing
+Is it a graph or a chart 
+— did I use the right word?
+Does it open on the visual-type noun with no leading article ("Line graph tracking
+…"), and not with "image of" / "picture of"?
+Did I avoid copying the title verbatim while still capturing what it's about? Dates: is the span already in the title? If yes, cut it; if no and it's part of what the visual shows, pull it from the axis and add it.
+Am I leaning short? (Two sentences for graphs/charts/diagrams; ~50 words or less for photos/ads.)
+For graphs/charts/diagrams/timelines: concept-first, no specific numbers, labels, or category names?
+Did I strip color and appearance-only detail, keeping only named specs and functional information?
+Is this a true image of text (a form/statement/rate sheet where the exact wording is the payload)? If so, give an identifying line PLUS a full transcription (numbers spelled out, abbreviations expanded), and flag data trapped in an image. A designed values/mission/policy slide is NOT this 
+— describe it as an ordinary figure, no quoting.
+More than one image in this exhibit 
+— or one composed graphic? Give genuinely separate images their own alt text each; keep a single composed layout as one. Don't enumerate a logo wall.
+Is this a table? If the user did NOT flag it, skip it. If they DID flag it, give it ONE orienting line of ~15 words naming what it's
+ about, not its columns or computations 
+— a flagged table needs less than a graph, not the same. Never transcribe the cells (transcription is only for true images-of-text). 9a. Is this a structural diagram (org chart, box/arrow parse, flow, value chain, chasm)? Describe it as a figure even if it's built from live text 
+— don't skip it as "just live text."
+Is this a formula? First: is it live text (skip) or an image/equation-object with a scrambled text layer (describe)? If it needs describing, switch to full-fidelity 
+— every term, grouping words, powers fenced with "the quantity 
+… , squared" (not "the square of 
+…"), "to the i" for exponents but "superscript" for labels, full number-words, read literally with no algebraic simplification, and state the reading back for verification. And check the whole document, not just exhibits.
+Would a listener come away with "there's a visual here, and here's roughly what it's about" 
+— rather than a data recitation?
+Examples (non-formula)
+Bar graph titled "Q3 Regional Revenue Growth (%)"
+
+ Too detailed: "Bar graph titled Q3 Regional Revenue Growth showing North at 12%, South at 8%, East at 15%, West at 4%."
+
+ Leading article: "A bar graph comparing revenue growth
+ "Bar graph comparing revenue growth across four regions in the third quarter, with growth varying noticeably by region."
+Timeline titled "History of the Company: 1990
+ "Timeline tracing the company's major milestones from its founding through its growth into an international business." (Span omitted 
+— the title carries it.)
+Timeline titled "Stealth and Standoff Precision Strike Timelines" (no span in the title)
+
+ Vague: "Timeline comparing the two programs across two decades
+…" (blurs the actual when 
+— "two decades" could sit anywhere).
+
+ "Timeline comparing the two programs from 1970 to 1990, aligning their milestones against contemporary conflicts." (Span pulled off the axis 
+— the title doesn't state it, and the concrete years give the listener footing.)
+Line graph of an exchange rate over several years (lean, two sentences)
+
+ "Line graph of the yen-to-dollar exchange rate over roughly nine years. The rate dips through the middle before rebounding sharply near the end." (Span kept 
+— the title didn't state it.)
+Genogram titled "Lehman Family Genogram"
+
+ "Family-tree diagram spanning three generations, running from a founding couple at the top down through their children and grandchildren."
+Branching flow diagram (trimmed to the essentials)
+
+ "Branching flow diagram following patients through the treatment pathway. The group divides at each stage, with counts and outcomes shown at the branch points."
+Product photo 
+— color stripped, named specs kept
+
+ With color/appearance padding: "A compact fluorescent bulb with a white spiral tube in red-and-white retail blister packaging."
+
+ "Fluorescent light bulb with a spiral tube, in packaging that advertises it as a 60-watt-equivalent bright white bulb rated to last nine years."
+Specifications screenshot (named specs are data, so they stay)
+
+,
+$captions-0-shapestyle-Object Caption
+*
+"captions-0-shapestyle-Object Title
+drawingline-0-drawinglineStyle
+)
+!stickyComment-0-paragraphstyle-12
+)
+!stickyComment-0-paragraphstyle-13
+)
+!stickyComment-0-paragraphstyle-14
+)
+!stickyComment-0-paragraphstyle-15
+)
+!stickyComment-0-paragraphstyle-16
+)
+!stickyComment-0-paragraphstyle-18
+)
+!stickyComment-0-paragraphstyle-22
+)
+!stickyComment-0-paragraphstyle-24
+)
+!stickyComment-0-paragraphstyle-28
+stickyComment-0-shapeStyle
+tableCell-0-categoryLevel1Row
+tableCell-0-categoryLevel2Row
+tableCell-0-categoryLevel3Row
+tableCell-0-categoryLevel4Row
+tableCell-0-categoryLevel5Row
+tableCell-0-footerRowStyle
+tableCell-0-headerColumnStyle
+tableCell-0-headerRowStyle
+tableCell-0-labelLevel1Row
+tableCell-0-labelLevel2Row
+tableCell-0-labelLevel3Row
+tableCell-0-labelLevel4Row
+tableCell-0-labelLevel5Row
+*
+"tableCell-0-pivotBodySummaryColumn
+tableCell-0-pivotBodySummaryRow
+,
+$tableCell-0-pivotHeaderColumnSummary
+tableCell-1-categoryLevel1Row
+tableCell-1-categoryLevel2Row
+tableCell-1-categoryLevel3Row
+tableCell-1-categoryLevel4Row
+tableCell-1-categoryLevel5Row
+tableCell-1-footerRowStyle
+tableCell-1-headerColumnStyle
+tableCell-1-headerRowStyle
+tableCell-1-labelLevel1Row
+tableCell-1-labelLevel2Row
+tableCell-1-labelLevel3Row
+tableCell-1-labelLevel4Row
+tableCell-1-labelLevel5Row
+*
+"tableCell-1-pivotBodySummaryColumn
+tableCell-1-pivotBodySummaryRow
+,
+$tableCell-1-pivotHeaderColumnSummary
+tableCell-2-categoryLevel1Row
+tableCell-2-categoryLevel2Row
+tableCell-2-categoryLevel3Row
+tableCell-2-categoryLevel4Row
+tableCell-2-categoryLevel5Row
+tableCell-2-footerRowStyle
+tableCell-2-headerColumnStyle
+tableCell-2-headerRowStyle
+tableCell-2-labelLevel1Row
+tableCell-2-labelLevel2Row
+tableCell-2-labelLevel3Row
+tableCell-2-labelLevel4Row
+tableCell-2-labelLevel5Row
+*
+"tableCell-2-pivotBodySummaryColumn
+tableCell-2-pivotBodySummaryRow
+,
+$tableCell-2-pivotHeaderColumnSummary
+tableCell-3-categoryLevel1Row
+tableCell-3-categoryLevel2Row
+tableCell-3-categoryLevel3Row
+tableCell-3-categoryLevel4Row
+tableCell-3-categoryLevel5Row
+tableCell-3-footerRowStyle
+tableCell-3-headerColumnStyle
+tableCell-3-headerRowStyle
+tableCell-3-labelLevel1Row
+tableCell-3-labelLevel2Row
+tableCell-3-labelLevel3Row
+tableCell-3-labelLevel4Row
+tableCell-3-labelLevel5Row
+*
+"tableCell-3-pivotBodySummaryColumn
+tableCell-3-pivotBodySummaryRow
+,
+$tableCell-3-pivotHeaderColumnSummary
+tableCell-4-categoryLevel1Row
+tableCell-4-categoryLevel2Row
+tableCell-4-categoryLevel3Row
+tableCell-4-categoryLevel4Row
+tableCell-4-categoryLevel5Row
+tableCell-4-footerRowStyle
+tableCell-4-headerColumnStyle
+tableCell-4-headerRowStyle
+tableCell-4-labelLevel1Row
+tableCell-4-labelLevel2Row
+tableCell-4-labelLevel3Row
+tableCell-4-labelLevel4Row
+tableCell-4-labelLevel5Row
+*
+"tableCell-4-pivotBodySummaryColumn
+tableCell-4-pivotBodySummaryRow
+,
+$tableCell-4-pivotHeaderColumnSummary
+tableCell-5-categoryLevel1Row
+tableCell-5-categoryLevel2Row
+tableCell-5-categoryLevel3Row
+tableCell-5-categoryLevel4Row
+tableCell-5-categoryLevel5Row
+tableCell-5-footerRowStyle
+tableCell-5-headerColumnStyle
+tableCell-5-headerRowStyle
+tableCell-5-labelLevel1Row
+tableCell-5-labelLevel2Row
+tableCell-5-labelLevel3Row
+tableCell-5-labelLevel4Row
+tableCell-5-labelLevel5Row
+*
+"tableCell-5-pivotBodySummaryColumn
+tableCell-5-pivotBodySummaryRow
+,
+$tableCell-5-pivotHeaderColumnSummary
+tableCellText-0-labelLevel1Row
+tableCellText-0-labelLevel2Row
+tableCellText-0-labelLevel3Row
+tableCellText-0-labelLevel4Row
+tableCellText-0-labelLevel5Row
+tableCellText-1-labelLevel1Row
+tableCellText-1-labelLevel2Row
+tableCellText-1-labelLevel3Row
+tableCellText-1-labelLevel4Row
+tableCellText-1-labelLevel5Row
+tableCellText-2-labelLevel1Row
+tableCellText-2-labelLevel2Row
+tableCellText-2-labelLevel3Row
+tableCellText-2-labelLevel4Row
+tableCellText-2-labelLevel5Row
+tableCellText-3-labelLevel1Row
+tableCellText-3-labelLevel2Row
+tableCellText-3-labelLevel3Row
+tableCellText-3-labelLevel4Row
+tableCellText-3-labelLevel5Row
+tableCellText-4-labelLevel1Row
+tableCellText-4-labelLevel2Row
+tableCellText-4-labelLevel3Row
+tableCellText-4-labelLevel4Row
+tableCellText-4-labelLevel5Row
+tableCellText-5-labelLevel1Row
+tableCellText-5-labelLevel2Row
+tableCellText-5-labelLevel3Row
+tableCellText-5-labelLevel4Row
+tableCellText-5-labelLevel5Row
+text-0-paragraphstyle-Title
+(
+ text-11-paragraphstyle-Heading 1
+(
+ text-12-paragraphstyle-Heading 2
+(
+ text-13-paragraphstyle-Heading 3
+(
+ text-14-paragraphstyle-Heading 4
+text-2-liststyle-Bullet Big
+text-20-paragraphstyle-Body 1
+(
+ text-26-paragraphstyle-Caption 3
+.
+&text-29-paragraphstyle-Header & Footer
+,
+$text-31-paragraphstyle-Footnote Text
+text-32-paragraphstyle-Label
+)
+!text-33-paragraphstyle-Label Dark
+,
+$text-34-paragraphstyle-Table Title 1
+,
+$text-35-paragraphstyle-Table Style 1
+,
+$text-36-paragraphstyle-Table Style 2
+,
+$text-37-paragraphstyle-Table Style 3
+,
+$text-38-paragraphstyle-Table Style 4
+,
+$text-39-paragraphstyle-Table Style 5
+,
+$text-40-paragraphstyle-Table Style 6
+,
+$text-41-paragraphstyle-Table Style 7
+text-6-paragraphstyle-Subtitle
+text-8-liststyle-Note Taking
+.
+&captions-0-paragraphstyle-Caption Text
+/
+'captions-0-paragraphstyle-Caption Title
+$captions-0-shapestyle-Object Caption*
+&captions-0-paragraphstyle-Caption Text*
+"captions-0-shapestyle-Object Title*
+'captions-0-paragraphstyle-Caption Title*
+character-style-hyperlink*
+chart-0-paragraphStyle_10*
+chart-0-paragraphStyle_11*
+chart-0-paragraphStyle_12*
+chart-0-paragraphStyle_13*
+chart-0-paragraphStyle_14*
+chart-0-paragraphStyle_15*
+chart-0-paragraphStyle_16*
+chart-0-paragraphStyle_17*
+chart-0-paragraphStyle_18*
+chart-0-paragraphStyle_19*
+chart-0-paragraphStyle_20*
+chart-0-paragraphStyle_21*
+chart-0-paragraphStyle_22*
+chart-0-paragraphStyle_23*
+chart-0-paragraphStyle_24*
+chart-0-paragraphStyle_25*
+chart-0-paragraphStyle_26*
+chart-0-paragraphStyle_27*
+chart-0-paragraphStyle_28*
+chart-0-paragraphStyle_29*
+chart-1-paragraphStyle_10*
+chart-1-paragraphStyle_11*
+chart-1-paragraphStyle_12*
+chart-1-paragraphStyle_13*
+chart-1-paragraphStyle_14*
+chart-1-paragraphStyle_15*
+chart-1-paragraphStyle_16*
+chart-1-paragraphStyle_17*
+chart-1-paragraphStyle_18*
+chart-1-paragraphStyle_19*
+chart-1-paragraphStyle_20*
+chart-1-paragraphStyle_21*
+chart-1-paragraphStyle_22*
+chart-1-paragraphStyle_23*
+chart-1-paragraphStyle_24*
+chart-1-paragraphStyle_25*
+chart-1-paragraphStyle_26*
+chart-1-paragraphStyle_27*
+chart-1-paragraphStyle_28*
+chart-1-paragraphStyle_29*
+chart-2-paragraphStyle_10*
+chart-2-paragraphStyle_11*
+chart-2-paragraphStyle_12*
+chart-2-paragraphStyle_13*
+chart-2-paragraphStyle_14*
+chart-2-paragraphStyle_15*
+chart-2-paragraphStyle_16*
+chart-2-paragraphStyle_17*
+chart-2-paragraphStyle_18*
+chart-2-paragraphStyle_19*
+chart-2-paragraphStyle_20*
+chart-2-paragraphStyle_21*
+chart-2-paragraphStyle_22*
+chart-2-paragraphStyle_23*
+chart-2-paragraphStyle_24*
+chart-2-paragraphStyle_25*
+chart-2-paragraphStyle_26*
+chart-2-paragraphStyle_27*
+chart-2-paragraphStyle_28*
+chart-2-paragraphStyle_29*
+chart-3-paragraphStyle_10*
+chart-3-paragraphStyle_11*
+chart-3-paragraphStyle_12*
+chart-3-paragraphStyle_13*
+chart-3-paragraphStyle_14*
+chart-3-paragraphStyle_15*
+chart-3-paragraphStyle_16*
+chart-3-paragraphStyle_17*
+chart-3-paragraphStyle_18*
+chart-3-paragraphStyle_19*
+chart-3-paragraphStyle_20*
+chart-3-paragraphStyle_21*
+chart-3-paragraphStyle_22*
+chart-3-paragraphStyle_23*
+chart-3-paragraphStyle_24*
+chart-3-paragraphStyle_25*
+chart-3-paragraphStyle_26*
+chart-3-paragraphStyle_27*
+chart-3-paragraphStyle_28*
+chart-3-paragraphStyle_29*
+chart-4-paragraphStyle_10*
+chart-4-paragraphStyle_11*
+chart-4-paragraphStyle_12*
+chart-4-paragraphStyle_13*
+chart-4-paragraphStyle_14*
+chart-4-paragraphStyle_15*
+chart-4-paragraphStyle_16*
+chart-4-paragraphStyle_17*
+chart-4-paragraphStyle_18*
+chart-4-paragraphStyle_19*
+chart-4-paragraphStyle_20*
+chart-4-paragraphStyle_21*
+chart-4-paragraphStyle_22*
+chart-4-paragraphStyle_23*
+chart-4-paragraphStyle_24*
+chart-4-paragraphStyle_25*
+chart-4-paragraphStyle_26*
+chart-4-paragraphStyle_27*
+chart-4-paragraphStyle_28*
+chart-4-paragraphStyle_29*
+chart-5-paragraphStyle_10*
+chart-5-paragraphStyle_11*
+chart-5-paragraphStyle_12*
+chart-5-paragraphStyle_13*
+chart-5-paragraphStyle_14*
+chart-5-paragraphStyle_15*
+chart-5-paragraphStyle_16*
+chart-5-paragraphStyle_17*
+chart-5-paragraphStyle_18*
+chart-5-paragraphStyle_19*
+chart-5-paragraphStyle_20*
+chart-5-paragraphStyle_21*
+chart-5-paragraphStyle_22*
+chart-5-paragraphStyle_23*
+chart-5-paragraphStyle_24*
+chart-5-paragraphStyle_25*
+chart-5-paragraphStyle_26*
+chart-5-paragraphStyle_27*
+chart-5-paragraphStyle_28*
+chart-5-paragraphStyle_29*
+drawingline-0-drawinglineStyle*
+text-20-paragraphstyle-Body 1*
+text-32-paragraphstyle-Label*
+!text-33-paragraphstyle-Label Dark*
+!stickyComment-0-paragraphstyle-12*
+!stickyComment-0-paragraphstyle-13*
+!stickyComment-0-paragraphstyle-14*
+!stickyComment-0-paragraphstyle-15*
+!stickyComment-0-paragraphstyle-16*
+!stickyComment-0-paragraphstyle-18*
+!stickyComment-0-paragraphstyle-22*
+!stickyComment-0-paragraphstyle-24*
+!stickyComment-0-paragraphstyle-28*
+stickyComment-0-shapeStyle*
+tableCell-0-categoryLevel1Row*
+tableCell-0-categoryLevel2Row*
+tableCell-0-categoryLevel3Row*
+tableCell-0-categoryLevel4Row*
+tableCell-0-categoryLevel5Row*
+tableCell-0-footerRowStyle*
+tableCell-0-headerColumnStyle*
+tableCell-0-headerRowStyle*
+tableCell-0-labelLevel1Row*
+tableCell-0-labelLevel2Row*
+tableCell-0-labelLevel3Row*
+tableCell-0-labelLevel4Row*
+tableCell-0-labelLevel5Row*
+"tableCell-0-pivotBodySummaryColumn*
+tableCell-0-pivotBodySummaryRow*
+$tableCell-0-pivotHeaderColumnSummary*
+tableCell-1-categoryLevel1Row*
+tableCell-1-categoryLevel2Row*
+tableCell-1-categoryLevel3Row*
+tableCell-1-categoryLevel4Row*
+tableCell-1-categoryLevel5Row*
+tableCell-1-footerRowStyle*
+tableCell-1-headerColumnStyle*
+tableCell-1-headerRowStyle*
+tableCell-1-labelLevel1Row*
+tableCell-1-labelLevel2Row*
+tableCell-1-labelLevel3Row*
+tableCell-1-labelLevel4Row*
+tableCell-1-labelLevel5Row*
+"tableCell-1-pivotBodySummaryColumn*
+tableCell-1-pivotBodySummaryRow*
+$tableCell-1-pivotHeaderColumnSummary*
+tableCell-2-categoryLevel1Row*
+tableCell-2-categoryLevel2Row*
+tableCell-2-categoryLevel3Row*
+tableCell-2-categoryLevel4Row*
+tableCell-2-categoryLevel5Row*
+tableCell-2-footerRowStyle*
+tableCell-2-headerColumnStyle*
+tableCell-2-headerRowStyle*
+tableCell-2-labelLevel1Row*
+tableCell-2-labelLevel2Row*
+tableCell-2-labelLevel3Row*
+tableCell-2-labelLevel4Row*
+tableCell-2-labelLevel5Row*
+"tableCell-2-pivotBodySummaryColumn*
+tableCell-2-pivotBodySummaryRow*
+$tableCell-2-pivotHeaderColumnSummary*
+tableCell-3-categoryLevel1Row*
+tableCell-3-categoryLevel2Row*
+tableCell-3-categoryLevel3Row*
+tableCell-3-categoryLevel4Row*
+tableCell-3-categoryLevel5Row*
+tableCell-3-footerRowStyle*
+tableCell-3-headerColumnStyle*
+tableCell-3-headerRowStyle*
+tableCell-3-labelLevel1Row*
+tableCell-3-labelLevel2Row*
+tableCell-3-labelLevel3Row*
+tableCell-3-labelLevel4Row*
+tableCell-3-labelLevel5Row*
+"tableCell-3-pivotBodySummaryColumn*
+tableCell-3-pivotBodySummaryRow*
+$tableCell-3-pivotHeaderColumnSummary*
+tableCell-4-categoryLevel1Row*
+tableCell-4-categoryLevel2Row*
+tableCell-4-categoryLevel3Row*
+tableCell-4-categoryLevel4Row*
+tableCell-4-categoryLevel5Row*
+tableCell-4-footerRowStyle*
+tableCell-4-headerColumnStyle*
+tableCell-4-headerRowStyle*
+tableCell-4-labelLevel1Row*
+tableCell-4-labelLevel2Row*
+tableCell-4-labelLevel3Row*
+tableCell-4-labelLevel4Row*
+tableCell-4-labelLevel5Row*
+"tableCell-4-pivotBodySummaryColumn*
+tableCell-4-pivotBodySummaryRow*
+$tableCell-4-pivotHeaderColumnSummary*
+tableCell-5-categoryLevel1Row*
+tableCell-5-categoryLevel2Row*
+tableCell-5-categoryLevel3Row*
+tableCell-5-categoryLevel4Row*
+tableCell-5-categoryLevel5Row*
+tableCell-5-footerRowStyle*
+tableCell-5-headerColumnStyle*
+tableCell-5-headerRowStyle*
+tableCell-5-labelLevel1Row*
+tableCell-5-labelLevel2Row*
+tableCell-5-labelLevel3Row*
+tableCell-5-labelLevel4Row*
+tableCell-5-labelLevel5Row*
+"tableCell-5-pivotBodySummaryColumn*
+tableCell-5-pivotBodySummaryRow*
+$tableCell-5-pivotHeaderColumnSummary*
+tableCellText-0-labelLevel1Row*
+tableCellText-0-labelLevel2Row*
+tableCellText-0-labelLevel3Row*
+tableCellText-0-labelLevel4Row*
+tableCellText-0-labelLevel5Row*
+tableCellText-1-labelLevel1Row*
+tableCellText-1-labelLevel2Row*
+tableCellText-1-labelLevel3Row*
+tableCellText-1-labelLevel4Row*
+tableCellText-1-labelLevel5Row*
+tableCellText-2-labelLevel1Row*
+tableCellText-2-labelLevel2Row*
+tableCellText-2-labelLevel3Row*
+tableCellText-2-labelLevel4Row*
+tableCellText-2-labelLevel5Row*
+tableCellText-3-labelLevel1Row*
+tableCellText-3-labelLevel2Row*
+tableCellText-3-labelLevel3Row*
+tableCellText-3-labelLevel4Row*
+tableCellText-3-labelLevel5Row*
+tableCellText-4-labelLevel1Row*
+tableCellText-4-labelLevel2Row*
+tableCellText-4-labelLevel3Row*
+tableCellText-4-labelLevel4Row*
+tableCellText-4-labelLevel5Row*
+tableCellText-5-labelLevel1Row*
+tableCellText-5-labelLevel2Row*
+tableCellText-5-labelLevel3Row*
+tableCellText-5-labelLevel4Row*
+tableCellText-5-labelLevel5Row*
+e]tQ?e]tQ?e]tQ?e]tQ?e]tQ?e]tQ?e]tQ?e]tQ?e]tQ?m
+text-0-paragraphstyle-Title*
+e]tQ?e]tQ?e]tQ?e]tQ?e]tQ?e]tQ?e]tQ?e]tQ?e]tQ?m
+e]tQ?e]tQ?e]tQ?e]tQ?e]tQ?e]tQ?e]tQ?e]tQ?e]tQ?m
+ text-11-paragraphstyle-Heading 1*
+ text-12-paragraphstyle-Heading 2*
+ text-13-paragraphstyle-Heading 3*
+ text-14-paragraphstyle-Heading 4*
+text-2-liststyle-Bullet Big*
+ text-26-paragraphstyle-Caption 3*
+&text-29-paragraphstyle-Header & Footer*
+$text-31-paragraphstyle-Footnote Text*
+$text-34-paragraphstyle-Table Title 1*
+$text-35-paragraphstyle-Table Style 1*
+$text-36-paragraphstyle-Table Style 2*
+$text-37-paragraphstyle-Table Style 3*
+$text-38-paragraphstyle-Table Style 4*
+$text-39-paragraphstyle-Table Style 5*
+text-4-liststyle-Lettered*
+$text-40-paragraphstyle-Table Style 6*
+$text-41-paragraphstyle-Table Style 7*
+text-5-liststyle-Numbered*
+text-6-paragraphstyle-Subtitle*
+text-8-liststyle-Note Taking*
+$33D9FA8F-287A-4820-932C-4FD94B156FA8
+Tables/DataList-1732734-2"
+Tables/DataList-1732733-2"
+Tables/DataList-1732739-2"
+Tables/DataList-1732692-2"
+Tables/DataList-1732741-2"
+Tables/HeaderStorageBucket
+$Tables/HeaderStorageBucket-1732788-2"
+Tables/DataList-1732694-2"
+Tables/DataList-1732778-2"
+Tables/DataList-1732699-2"
+Tables/DataList-1732698-2"
+Tables/DataList-1732697-2"
+Tables/DataList-1732743-2"
+Tables/DataList-1732696-2"
+Tables/DataList-1732740-2"
+Tables/DataList-1732693-2"
+Tables/HeaderStorageBucket
+$Tables/HeaderStorageBucket-1732787-2"
+Tables/DataList-1732789-2"
+Tables/DataList-1732742-2"
+Tables/DataList-1732695-2"
+Tables/DataList-1732737-2"
+Tables/DataList-1732690-2"
+Tables/DataList-1732736-2"
+Tables/HeaderStorageBucket
+$Tables/HeaderStorageBucket-1732777-2"
+AnnotationAuthorStorage-1732610"
+Tables/DataList-1732738-2"
+Tables/DataList-1732691-2"
+Tables/HeaderStorageBucket"
+Tables/DataList-1732735-2"
+CalculationEngine-1732611"
+TSCEReduceCalcEngineMsgSize
+*#ginger/00b_theme/tile_paper_medgrayR
+bullet_circle-blk-resize.pdf"
+bullet_circle-blk-resize"\
+*"ginger/00b_theme/tile_paper_ltgrayR
+hardcover_bullet_black.png"
+*&ginger/01_theme/hardcover_bullet_black"?

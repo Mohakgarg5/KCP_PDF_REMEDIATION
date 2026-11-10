@@ -327,7 +327,7 @@ specifics.
 - DO NOT recite specific numbers, data labels, axis values or category names.
   This is the most common failure. "Alto 69%, Nano 16%, Spark 10%" is wrong;
   "comparison of market share among small hatchbacks" is right.
-- Prioritise meaning over literal contents.
+- Prioritize meaning over literal contents.
 Photographs and ads may carry more concrete description — there is no data
 table to defer to — but keep them tight.
 
@@ -347,7 +347,7 @@ Open on the noun naming the visual type, with NO leading article:
 GRAPH vs CHART
 Plotting numeric data on axes -> "graph" (line graph, bar graph, scatter).
 Any other visual structure -> "chart" (flowchart, org chart, pie chart).
-Do not trust a caption's label. A finance screenshot labelled "Bar Chart" is
+Do not trust a caption's label. A finance screenshot labeled "Bar Chart" is
 usually an open-high-low-close or candlestick plot — call that a "price
 chart", not a bar graph.
 
@@ -358,9 +358,9 @@ Dates: if the title already states the time span, leave it out. If it does
 not, and the span is part of what the visual shows, take it from the axis and
 include it.
 
-COLOUR AND APPEARANCE
-Do not mention colour unless the colour itself carries meaning — a
-red-versus-green status indicator, or a legend where colour is the only way
+COLOR AND APPEARANCE
+Do not mention color unless the color itself carries meaning — a
+red-versus-green status indicator, or a legend where color is the only way
 categories are distinguished. Many listeners have been blind since birth and
 have no reference for hue. Cut appearance-only detail (sheen, packaging
 styling, "three orange cranes"). KEEP named specifications and data
@@ -404,7 +404,7 @@ You must produce a description. Do not reply DECORATIVE or UNCLEAR. If the
 image is a logo or ornament, say so plainly. If it is blurry, describe what
 can still be made out and say the detail is not legible.
 
-Do not recite numbers or data labels. Do not mention colour unless the colour
+Do not recite numbers or data labels. Do not mention color unless the color
 itself carries meaning. Never invent anything you cannot see.
 """
 
@@ -419,7 +419,7 @@ def _context_prompt(ctx: FigureContext) -> str:
         labels = ", ".join(f"{n} {v:g}%" for n, v in ctx.data_labels)
         # Context for COMPREHENSION, not for recitation.  These values tell the
         # model what the chart is measuring (shares vs growth rates, say) so it
-        # can characterise it correctly — but the house style forbids reading
+        # can characterize it correctly — but the house style forbids reading
         # them out, so say so in the same breath as supplying them.
         bits.append(
             "Values read from the PDF text layer, to help you understand what "
@@ -477,7 +477,7 @@ def draft_with_vision(png: bytes, ctx: FigureContext, client,
     if not text:
         return None, "empty_response"
     # Match the sentinel EXACTLY, not as a prefix: a real description may
-    # legitimately open with the word ("Decorative border in school colours"),
+    # legitimately open with the word ("Decorative border in school colors"),
     # and a prefix test would silently discard it.
     sentinel = text.upper().strip().rstrip(".")
     if sentinel == "DECORATIVE":
