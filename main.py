@@ -102,9 +102,7 @@ def process_single_pdf(input_path: str, output_dir: str, skip_validation: bool =
                 result.alt_text_summary = summary
                 result.alt_text_report = format_alt_text_report(summary)
                 print(f"        {summary['drafted']}/{summary['figures_needing_alt']} "
-                      f"drafted ({summary['deterministic']} from text layer, "
-                      f"{summary['vision']} from image), "
-                      f"{summary['left_blank']} left blank")
+                      f"drafted, {summary['left_blank']} left blank")
             except Exception as e:
                 # Drafting must never break remediation — the PDF is already
                 # structurally correct and compliant at this point.

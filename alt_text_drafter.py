@@ -10,19 +10,20 @@ review report.
 **A figure that already carries a description is never touched.** That is the
 whole contract with the reviewer — their authored alt text is authoritative.
 
-Two drafting paths, cheapest-and-most-accurate first:
+Drafting is audio-first and follows the reviewer's house style, kept verbatim
+in ``docs/ALT_TEXT_HOUSE_STYLE.md``: alt text ORIENTS a listener, it does not
+replace the figure. Concept first, one tight line where possible, and NO
+recitation of numbers, data labels, axis values or category names.
 
-1. ``deterministic`` — when the chart's data sits in the page's TEXT layer
-   (Nissan's pie charts: "Nano 16%", "Alto 69%" are real text objects), the
-   numbers are read directly and composed into a description. Nothing leaves
-   the machine, and the values are exact rather than read off pixels.
-2. ``vision`` — otherwise the figure is rendered to PNG and sent to Claude.
-   This is the only path for raster exhibits (KEL189's pie, HP's charts),
-   where the labels are baked into the image.
+The figure is rendered to PNG and sent to Claude with whatever context the
+page yields — caption, source note, and any values readable in the text layer.
+Those values are supplied for COMPREHENSION only (so the model can tell a
+share from a growth rate); the house style forbids reading them out.
 
-Everything that is neither — photographs, logos, anything the classifier is
-unsure about — is left blank and listed in the report for manual authoring,
-per the original proposal to Charlotte.
+There used to be a second, "deterministic" path that scraped the text layer
+and composed a description from the exact values. It was removed once the
+house style arrived: reciting the data is precisely what the style rejects,
+so the path's one advantage was its defect.
 
 Drafts are written as clean text with NO "[DRAFT]" prefix: /Alt is read aloud
 verbatim by a screen reader, so a marker there would be spoken. Which figures
@@ -86,7 +87,7 @@ class DraftResult:
     page: int
     bbox: list
     caption: Optional[str]
-    method: str            # "deterministic" | "vision" | "skipped"
+    method: str            # "vision" | "skipped"
     alt_text: Optional[str]
     reason: Optional[str] = None
     model: Optional[str] = None
@@ -160,7 +161,7 @@ def find_undescribed_figures(pdf: pikepdf.Pdf) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Context harvesting — the free, deterministic part
+# Context harvesting — free, local, no API call
 # ---------------------------------------------------------------------------
 
 def _overlaps(a, b, pad=0.0) -> bool:
@@ -240,73 +241,6 @@ def build_context(doc_content, page_no: int, bbox: list,
 
 
 # ---------------------------------------------------------------------------
-# Path 1 — deterministic, from the text layer. No data leaves the machine.
-# ---------------------------------------------------------------------------
-
-_MONTHS = ("january", "february", "march", "april", "may", "june", "july",
-           "august", "september", "october", "november", "december",
-           "q1", "q2", "q3", "q4", "fy")
-_YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
-
-
-def _find_period(nearby_text: list) -> Optional[str]:
-    """Pick out a period label ("June 2011", "2012") from in-figure text.
-
-    Two pie charts under one caption are told apart only by their own title,
-    so without this both panels of Nissan's "Market Share of A Hatchbacks"
-    would get word-for-word identical alt text.
-    """
-    for text in nearby_text:
-        t = text.strip()
-        if len(t) > 40 or _PERCENT_RE.search(t):
-            continue
-        low = t.lower()
-        if _YEAR_RE.search(t) and (any(m in low for m in _MONTHS)
-                                   or len(t.split()) <= 3):
-            return t
-    return None
-
-
-def draft_deterministic(ctx: FigureContext,
-                        tolerance: float = 2.0) -> Optional[str]:
-    """Compose a description from text-layer data labels, or None.
-
-    Only fires when the labels look like a complete part-to-whole series —
-    at least three slices summing to ~100%. That check is what makes the
-    result trustworthy: a partial scrape would describe the chart wrongly,
-    and silently wrong alt text is worse than none.
-    """
-    labels = ctx.data_labels
-    if len(labels) < 3:
-        return None
-    total = sum(v for _l, v in labels)
-    if abs(total - 100.0) > tolerance:
-        return None
-
-    ordered = sorted(labels, key=lambda t: -t[1])
-    parts = ", ".join(f"{name} {value:g}%" for name, value in ordered)
-
-    # Caption text is title-cased by the author — reproduce it verbatim rather
-    # than case-folding it ("market Share of A Hatchbacks" reads as a typo).
-    subject = ctx.caption.rstrip(".") if ctx.caption else None
-    period = _find_period(ctx.nearby_text)
-    if subject and period:
-        lead = f"Pie chart showing {subject}, {period}"
-    elif subject:
-        lead = f"Pie chart showing {subject}"
-    elif period:
-        lead = f"Pie chart, {period}"
-    else:
-        lead = "Pie chart"
-
-    biggest, biggest_v = ordered[0]
-    return (
-        f"{lead}. Shares, largest to smallest: {parts}. "
-        f"{biggest} holds the largest share at {biggest_v:g}%."
-    )
-
-
-# ---------------------------------------------------------------------------
 # Rendering a figure to PNG for the vision path
 # ---------------------------------------------------------------------------
 
@@ -375,28 +309,80 @@ def render_figure_png(src_pdf: str, page_no: int, bbox: list,
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """\
-You write alt text for figures in Kellogg School of Management business case \
-studies, for students using screen readers.
+You write alt text for exhibits in Kellogg School of Management case studies,
+in the house style of the school's accessibility reviewer.
 
-Rules:
-- Lead with the figure type ("Bar chart showing…", "Flowchart of…", \
-"Photograph of…"), then the content.
-- Report the actual data. Give real axis labels, categories, series names and \
-values you can read. A reader who cannot see the figure should be able to \
-discuss it in class.
-- State the trend or comparison the figure exists to show.
-- Do not begin with "Image of", "Graphic showing", or the figure's number — \
-the caption already supplies the number.
-- Do not repeat the caption verbatim, and do not restate the "Source:" note. \
-Both are real text on the page and are already read aloud; repeating them \
-makes the reader hear the same sentence twice.
-- No interpretation beyond what is visibly supported. Never invent a value.
-- Plain prose, no markdown, no bullet points.
-- 1-3 sentences for simple figures. Up to 6 for dense exhibits (tables, \
-multi-panel charts, org charts); include the key rows or nodes.
-- If the figure is purely decorative (a logo, a border, a stock photograph \
-with no informational content), reply with exactly: DECORATIVE
-- If you cannot read it well enough to describe it accurately, reply with \
+ALT TEXT HERE IS WRITTEN TO BE HEARD, NOT READ. A listener takes it in as a
+spoken audio clip. Concept first, plain language, short sentences, no data
+dumps. Less is more: if a shorter version conveys the idea just as well, use
+the shorter version. Lean short by default.
+
+WHAT THE ALT TEXT IS FOR
+Alt text ORIENTS, it does not replace. For graphs, charts, diagrams and
+timelines your only job is to flag that a visual is present and orient the
+listener to its general nature. The surrounding case text carries the
+specifics.
+- Say what kind of visual it is and the general idea or shape it conveys —
+  a rising trend, a comparison across groups, a step-by-step process.
+- DO NOT recite specific numbers, data labels, axis values or category names.
+  This is the most common failure. "Alto 69%, Nano 16%, Spark 10%" is wrong;
+  "comparison of market share among small hatchbacks" is right.
+- Prioritise meaning over literal contents.
+Photographs and ads may carry more concrete description — there is no data
+table to defer to — but keep them tight.
+
+LENGTH
+- Graphs, charts, diagrams, timelines: up to ~20 words, AIM MUCH LOWER. One
+  tight line is the goal; two sentences is the absolute ceiling. Reach for a
+  second sentence only when the visual genuinely carries two distinct ideas.
+- Photographs and ads: ~25 words, less if it reads clean.
+- Tables (only when you are told to describe one): ~15 words, one clause,
+  naming what it is ABOUT — never its columns or computations.
+
+OPENING WORDS
+Open on the noun naming the visual type, with NO leading article:
+"Line graph tracking...", "Photograph of...", "Flowchart of...",
+"Screenshot of...". Never "A line graph...", never "image of" / "picture of".
+
+GRAPH vs CHART
+Plotting numeric data on axes -> "graph" (line graph, bar graph, scatter).
+Any other visual structure -> "chart" (flowchart, org chart, pie chart).
+Do not trust a caption's label. A finance screenshot labelled "Bar Chart" is
+usually an open-high-low-close or candlestick plot — call that a "price
+chart", not a bar graph.
+
+TITLES AND DATES
+Do not copy the exhibit title word for word; reference the subject phrased
+differently, so you are not echoing a caption that is already read aloud.
+Dates: if the title already states the time span, leave it out. If it does
+not, and the span is part of what the visual shows, take it from the axis and
+include it.
+
+COLOUR AND APPEARANCE
+Do not mention colour unless the colour itself carries meaning — a
+red-versus-green status indicator, or a legend where colour is the only way
+categories are distinguished. Many listeners have been blind since birth and
+have no reference for hue. Cut appearance-only detail (sheen, packaging
+styling, "three orange cranes"). KEEP named specifications and data
+("60-watt equivalent", "rated to last nine years") — those are facts, not
+visuals. Exception: when the form IS the subject (a design-patent drawing, an
+architectural rendering, a logo-design exhibit), describe the shape.
+
+PARTICULAR CASES
+- Structural diagrams — org charts, flow charts, value chains, nested-box
+  parses, two-sides/chasm diagrams — get a normal one-line orienting
+  description even when built from live text, because the arrangement carries
+  meaning the words alone do not.
+- A wall of client or partner logos: do not enumerate them. One line, e.g.
+  "Selection of logos for the company's major clients gathered together."
+- A family tree or genogram: name it, note roughly how many generations, give
+  the general shape. Leave symbol conventions out.
+- A designed values / mission / policy slide is an ordinary figure: describe
+  it, do not quote it.
+
+If the figure is purely decorative — a logo, a border, an ornament with no
+informational content — reply with exactly: DECORATIVE
+If you cannot read it well enough to describe it accurately, reply with
 exactly: UNCLEAR
 """
 
@@ -407,19 +393,19 @@ exactly: UNCLEAR
 # reader is told something is there and given nothing.  This pass removes the
 # escape hatches and asks for whatever can honestly be seen.
 FALLBACK_SYSTEM_PROMPT = """\
-You write alt text for figures in Kellogg School of Management business case \
-studies, for students using screen readers.
+You write alt text for exhibits in Kellogg School of Management case studies,
+to be heard rather than read.
 
-Describe what is visibly present in this image. Lead with the figure type, \
-then the content: shapes, labels, text, colours, layout, people, objects — \
-whatever is actually there.
+Describe what is visibly present. Open on the noun naming the visual type with
+no leading article ("Decorative border...", "Photograph of..."). One tight
+line, ~15 words, two sentences at the absolute most.
 
-You must produce a description. Do not reply DECORATIVE or UNCLEAR. If the \
-image is a logo or ornament, say so plainly ("Decorative border in school \
-colours"). If it is blurry or low-resolution, describe what can still be made \
-out and say the detail is not legible.
+You must produce a description. Do not reply DECORATIVE or UNCLEAR. If the
+image is a logo or ornament, say so plainly. If it is blurry, describe what
+can still be made out and say the detail is not legible.
 
-Plain prose, no markdown, 1-3 sentences. Never invent a value you cannot read.
+Do not recite numbers or data labels. Do not mention colour unless the colour
+itself carries meaning. Never invent anything you cannot see.
 """
 
 
@@ -431,9 +417,14 @@ def _context_prompt(ctx: FigureContext) -> str:
         bits.append(f"Source note: {ctx.source_note}")
     if ctx.data_labels:
         labels = ", ".join(f"{n} {v:g}%" for n, v in ctx.data_labels)
+        # Context for COMPREHENSION, not for recitation.  These values tell the
+        # model what the chart is measuring (shares vs growth rates, say) so it
+        # can characterise it correctly — but the house style forbids reading
+        # them out, so say so in the same breath as supplying them.
         bits.append(
-            "Values recovered from the PDF text layer (these are exact — "
-            f"prefer them over reading the pixels): {labels}"
+            "Values read from the PDF text layer, to help you understand what "
+            f"the chart measures: {labels}. Use these to work out what the "
+            "figure is ABOUT — do NOT list them in the alt text."
         )
     elif ctx.nearby_text:
         snippet = " | ".join(ctx.nearby_text[:25])[:1200]
@@ -513,7 +504,7 @@ def draft_alt_text(pdf_path: str, source_pdf: str, doc_content=None,
     if not targets:
         pdf.close()
         return {"pdf": os.path.basename(pdf_path), "figures_needing_alt": 0,
-                "drafted": 0, "deterministic": 0, "vision": 0, "left_blank": 0,
+                "drafted": 0, "vision": 0, "left_blank": 0,
                 "model": None, "figures": []}
 
     results: list = []
@@ -549,16 +540,11 @@ def draft_alt_text(pdf_path: str, source_pdf: str, doc_content=None,
                if doc_content is not None
                else FigureContext(page=page_no, bbox=list(bbox)))
 
-        # 1. Deterministic, exact, free.
-        alt = draft_deterministic(ctx)
-        if alt:
-            elem[pikepdf.Name("/Alt")] = pikepdf.String(alt)
-            results.append(DraftResult(
-                page=page_no, bbox=bbox, caption=ctx.caption,
-                method="deterministic", alt_text=alt))
-            continue
-
-        # 2. Vision.
+        # The house style wants a figure CHARACTERISED, not transcribed, so
+        # there is no longer a text-layer drafting path: reciting the values
+        # scraped off the page is exactly what it forbids.  Those values are
+        # still harvested, but only as context so the model can tell what the
+        # chart measures.  See docs/ALT_TEXT_HOUSE_STYLE.md.
         if client is None or api_circuit_open:
             results.append(DraftResult(
                 page=page_no, bbox=bbox, caption=ctx.caption,
@@ -634,7 +620,6 @@ def draft_alt_text(pdf_path: str, source_pdf: str, doc_content=None,
         "pdf": os.path.basename(pdf_path),
         "figures_needing_alt": len(targets),
         "drafted": len(drafted),
-        "deterministic": sum(1 for r in results if r.method == "deterministic"),
         "vision": sum(1 for r in results if r.method == "vision"),
         "left_blank": sum(1 for r in results if r.method == "skipped"),
         "model": config.ALT_TEXT_MODEL if config.ALT_TEXT_USE_VISION else None,
@@ -654,8 +639,7 @@ def format_report(summary: dict) -> str:
     lines = [
         f"Alt-text drafting — {summary['pdf']}",
         f"  figures needing a description : {summary['figures_needing_alt']}",
-        f"  drafted                       : {summary['drafted']} "
-        f"({summary['deterministic']} from text layer, {summary['vision']} from image)",
+        f"  drafted                       : {summary['drafted']}",
         f"  left blank for manual input   : {summary['left_blank']}",
     ]
     if summary.get("model"):

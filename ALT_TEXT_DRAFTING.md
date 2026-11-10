@@ -3,6 +3,26 @@
 Backend only. Nothing in the Streamlit UI changes; drafts are written into the
 output PDF's `/Alt` and into a sidecar `*_alt_text_report.json` next to it.
 
+## House style
+
+Drafts follow the reviewer's own audio-first style, kept verbatim in
+[`docs/ALT_TEXT_HOUSE_STYLE.md`](docs/ALT_TEXT_HOUSE_STYLE.md). That file is
+the authority — when it changes, change the prompt in `alt_text_drafter.py`
+to match. The headline rules:
+
+- Alt text **orients**, it does not replace. Concept first.
+- **No reciting** numbers, data labels, axis values or category names.
+- Graphs/charts/diagrams **~20 words, aim lower** — one tight line is the
+  goal. Photographs ~25.
+- Open on the visual-type noun, no leading article, never "image of".
+- No colour unless the colour carries meaning; keep named specs.
+- Don't echo the exhibit title; include a date span only if the title lacks it.
+
+There used to be a second "deterministic" path that scraped exact values from
+the text layer and composed a description from them. It was removed when the
+house style arrived: reciting the data is precisely what the style rejects, so
+that path's one advantage was its defect.
+
 ## What it does
 
 For every `/Figure` in the finished PDF:

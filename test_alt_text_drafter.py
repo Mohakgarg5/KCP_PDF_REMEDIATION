@@ -79,82 +79,67 @@ class FakeClient:
 # Deterministic drafting — and, crucially, when it must refuse
 # ---------------------------------------------------------------------------
 
-class TestDeterministicDrafting(unittest.TestCase):
-
-    def _ctx(self, labels, caption=None, nearby=None):
-        return FigureContext(page=1, bbox=[0, 0, 100, 100], caption=caption,
-                             data_labels=labels, nearby_text=nearby or [])
-
-    def test_drafts_a_complete_share_series(self):
-        ctx = self._ctx(
-            [("Alto", 69.0), ("Nano", 16.0), ("Spark", 10.0),
-             ("Maruti 800", 5.0), ("Eon", 0.0)],
-            caption="Market Share of A Hatchbacks",
-            nearby=["June 2011"],
-        )
-        alt = A.draft_deterministic(ctx)
-        self.assertIsNotNone(alt)
-        self.assertIn("Market Share of A Hatchbacks", alt)
-        self.assertIn("June 2011", alt)
-        self.assertIn("Alto 69%", alt)
-        self.assertIn("Maruti 800 5%", alt)
-        self.assertTrue(alt.startswith("Pie chart showing"))
-
-    def test_orders_slices_largest_first(self):
-        ctx = self._ctx([("C", 10.0), ("A", 70.0), ("B", 20.0)])
-        alt = A.draft_deterministic(ctx)
-        self.assertLess(alt.index("A 70%"), alt.index("B 20%"))
-        self.assertLess(alt.index("B 20%"), alt.index("C 10%"))
-
-    def test_refuses_growth_rates_that_do_not_sum_to_100(self):
-        # KEL189 Exhibit 3: percentages are YoY growth, not shares.
-        ctx = self._ctx([
-            ("Information Worker", 18.0), ("Server & Tools", 19.0),
-            ("Client", 16.0), ("Mobile and Embedded Devices", 33.0),
-            ("Microsoft Business Solutions", 4.0), ("MSN", 16.0),
-            ("Home & Entertainment", 17.0),
-        ], caption="Revenue by the Seven P&Ls")
-        self.assertIsNone(
-            A.draft_deterministic(ctx),
-            "growth rates must not be described as shares",
-        )
-
-    def test_refuses_an_incomplete_scrape(self):
-        # One slice missed -> 95% -> cannot be trusted.
-        ctx = self._ctx([("Alto", 69.0), ("Nano", 16.0), ("Spark", 10.0)])
-        self.assertIsNone(A.draft_deterministic(ctx))
-
-    def test_refuses_fewer_than_three_labels(self):
-        ctx = self._ctx([("A", 50.0), ("B", 50.0)])
-        self.assertIsNone(A.draft_deterministic(ctx))
-
-    def test_tolerates_rounding(self):
-        ctx = self._ctx([("A", 33.3), ("B", 33.3), ("C", 33.3)])
-        self.assertIsNotNone(A.draft_deterministic(ctx))
-
-    def test_caption_case_is_preserved(self):
-        ctx = self._ctx([("A", 50.0), ("B", 30.0), ("C", 20.0)],
-                        caption="Market Share of A Hatchbacks")
-        self.assertIn("Market Share of A Hatchbacks",
-                      A.draft_deterministic(ctx))
+def _flat(s):
+    """Collapse whitespace so assertions survive prompt re-wrapping."""
+    return " ".join(s.split())
 
 
-class TestPeriodDetection(unittest.TestCase):
+class TestHouseStylePrompt(unittest.TestCase):
+    """The prompt must carry the reviewer's rules, not a paraphrase of them.
 
-    def test_finds_month_and_year(self):
-        self.assertEqual(A._find_period(["June 2011", "Alto"]), "June 2011")
+    docs/ALT_TEXT_HOUSE_STYLE.md is the authority; these assert the rules that
+    our drafts actually broke before it arrived.
+    """
 
-    def test_finds_bare_year(self):
-        self.assertEqual(A._find_period(["2012"]), "2012")
+    def test_forbids_reciting_data(self):
+        s = _flat(A.SYSTEM_PROMPT)
+        self.assertIn("DO NOT recite specific numbers, data labels, axis values", s)
 
-    def test_ignores_percentage_labels(self):
-        self.assertIsNone(A._find_period(["Alto 69%", "Nano 16%"]))
+    def test_states_the_length_targets(self):
+        s = _flat(A.SYSTEM_PROMPT)
+        self.assertIn("up to ~20 words, AIM MUCH LOWER", s)
+        self.assertIn("One tight line is the goal", s)
+        self.assertIn("Photographs and ads: ~25 words", s)
 
-    def test_ignores_long_prose(self):
-        self.assertIsNone(A._find_period([
-            "Source: Raw numbers were compiled from Team-BHP in 2011 and "
-            "then manipulated to calculate market share"
-        ]))
+    def test_forbids_leading_articles_and_image_of(self):
+        s = _flat(A.SYSTEM_PROMPT)
+        self.assertIn("with NO leading article", s)
+        self.assertIn('never "image of" / "picture of"', s)
+
+    def test_forbids_echoing_the_title(self):
+        self.assertIn("Do not copy the exhibit title word for word",
+                      _flat(A.SYSTEM_PROMPT))
+
+    def test_carries_the_colour_rule(self):
+        s = _flat(A.SYSTEM_PROMPT)
+        self.assertIn("Do not mention colour unless the colour itself carries", s)
+        self.assertIn("KEEP named specifications", s)
+
+    def test_carries_the_graph_vs_chart_distinction(self):
+        s = _flat(A.SYSTEM_PROMPT)
+        self.assertIn("Plotting numeric data on axes", s)
+        self.assertIn('"price chart"', s)
+
+    def test_covers_structural_diagrams_and_logo_walls(self):
+        s = _flat(A.SYSTEM_PROMPT)
+        self.assertIn("Structural diagrams", s)
+        self.assertIn("do not enumerate them", s)
+
+    def test_the_deterministic_path_is_gone(self):
+        # Reciting scraped values is exactly what the house style rejects.
+        self.assertFalse(hasattr(A, "draft_deterministic"))
+
+
+class TestHarvestedValuesAreContextOnly(unittest.TestCase):
+    """Text-layer values help the model understand, but must not be read out."""
+
+    def test_values_are_offered_but_recitation_forbidden(self):
+        ctx = FigureContext(page=1, bbox=[0, 0, 1, 1],
+                            data_labels=[("Alto", 69.0), ("Nano", 16.0)])
+        prompt = A._context_prompt(ctx)
+        self.assertIn("Alto 69%", prompt)
+        self.assertIn("do NOT list them in the alt text", prompt)
+        self.assertIn("what the chart measures", prompt)
 
 
 # ---------------------------------------------------------------------------
@@ -258,14 +243,14 @@ class TestVisionPath(unittest.TestCase):
         self.assertEqual(blocks[0]["source"]["media_type"], "image/png")
         self.assertIn("Exhibit 3", blocks[1]["text"])
 
-    def test_exact_text_layer_values_are_offered_to_the_model(self):
+    def test_text_layer_values_reach_the_model_as_context_only(self):
         ctx = FigureContext(page=1, bbox=[0, 0, 1, 1],
                             data_labels=[("Alto", 69.0), ("Nano", 16.0)])
         client = FakeClient(_Resp("ok"))
         A.draft_with_vision(b"x", ctx, client, "claude-opus-5", "medium")
         prompt = client.messages.calls[0]["messages"][0]["content"][1]["text"]
         self.assertIn("Alto 69%", prompt)
-        self.assertIn("exact", prompt.lower())
+        self.assertIn("do NOT list them in the alt text", prompt)
 
     def test_effort_is_dropped_for_models_that_reject_it(self):
         # Haiku 4.5 returns 400 on output_config.effort — sending it anyway
@@ -390,22 +375,39 @@ class TestEndToEnd(unittest.TestCase):
         finally:
             config.ALT_TEXT_USE_VISION = old
 
-    def test_nissan_pies_are_drafted_from_the_text_layer(self):
-        r = self._run(NISSAN)
-        s = r.alt_text_summary
-        self.assertEqual(s["deterministic"], 2)
-        drafted = [f["alt_text"] for f in s["figures"] if f["alt_text"]]
-        self.assertTrue(any("June 2011" in a for a in drafted))
-        self.assertTrue(any("June 2012" in a for a in drafted))
-        self.assertTrue(any("Alto 69%" in a for a in drafted))
-
-    def test_the_two_pies_get_different_descriptions(self):
+    def test_nothing_is_drafted_when_vision_is_off(self):
+        # The text-layer path is gone: scraping values and reciting them is
+        # what the house style rejects, so with vision disabled every figure
+        # is honestly left blank and flagged rather than badly described.
         s = self._run(NISSAN).alt_text_summary
-        drafted = [f["alt_text"] for f in s["figures"] if f["alt_text"]]
-        self.assertEqual(len(drafted), len(set(drafted)))
+        self.assertEqual(s["drafted"], 0)
+        self.assertEqual(s["left_blank"], s["figures_needing_alt"])
+        self.assertNotIn("deterministic", s)
+
+    def test_every_figure_is_still_accounted_for(self):
+        s = self._run(NISSAN).alt_text_summary
+        self.assertEqual(len(s["figures"]), s["figures_needing_alt"])
+        for f in s["figures"]:
+            self.assertTrue(f["alt_text"] or f["reason"],
+                            "a figure must be described or have a reason")
 
     def test_drafts_land_in_the_pdf_itself(self):
-        r = self._run(NISSAN)
+        # Drive the write path with a stubbed model so the plumbing is tested
+        # without an API call — and without asserting a recited value, which
+        # the house style forbids.
+        import config
+        stub = "Pie chart comparing market share among small hatchbacks."
+        real = A.draft_with_vision
+        A.draft_with_vision = lambda *a, **k: (stub, None)
+        old = config.ALT_TEXT_USE_VISION
+        config.ALT_TEXT_USE_VISION = True
+        try:
+            from main import process_single_pdf
+            r = process_single_pdf(NISSAN, self._tmp, skip_validation=True)
+            self.assertTrue(r.success, r.error)
+        finally:
+            A.draft_with_vision = real
+            config.ALT_TEXT_USE_VISION = old
         pdf = pikepdf.open(r.output_path)
         alts = []
 
@@ -424,7 +426,8 @@ class TestEndToEnd(unittest.TestCase):
         for x in (st.get("/K") if isinstance(st.get("/K"), pikepdf.Array)
                   else [st.get("/K")]):
             walk(x)
-        self.assertTrue(any("Alto 69%" in a for a in alts))
+        self.assertTrue(any(stub in a for a in alts),
+                        "the drafted description must reach the PDF's /Alt")
 
     def test_a_review_report_is_written(self):
         r = self._run(NISSAN)
