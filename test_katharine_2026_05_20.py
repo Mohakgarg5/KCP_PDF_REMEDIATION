@@ -26,7 +26,9 @@ from main import process_single_pdf
 import pdf_postprocess
 
 
-DRRC_DIR = "/Users/mohakgarg/Desktop/DRRC Documents/reversionfixes (1)"
+from fixture_paths import batch_dir
+
+DRRC_DIR = batch_dir("reversionfixes (1)")
 KEL201_SRC = os.path.join(DRRC_DIR, "KEL201 AutoRetailing (B).pdf")
 ZOLTEK_OUTPUT = os.path.join(DRRC_DIR, "KEL007 Zoltek_accessible.pdf")
 STEEL_WARS_OUTPUT = os.path.join(DRRC_DIR, "KEL002 Steel Wars_accessible (1).pdf")
